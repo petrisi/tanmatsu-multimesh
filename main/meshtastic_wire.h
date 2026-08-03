@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: MIT
+//
+// Meshtastic on-air framing: the 16-byte header, and just enough protobuf to
+// pull a text message out of the decrypted Data submessage.
+//
+// Wire layout derived from the Meshtastic firmware (GPL-3.0) -- this is an
+// independent implementation of the format, not a copy of its code, so this
+// file stays MIT like the rest of the project.
+
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#define MT_HEADER_SIZE      16
+#define MT_MAX_PAYLOAD_SIZE 240
+
+// Header flag byte.
+#define MT_FLAGS_HOP_LIMIT_MASK  0x07
+#define MT_FLAGS_WANT_ACK_MASK   0x08
+#define MT_FLAGS_VIA_MQTT_MASK   0x10
+#define MT_FLAGS_HOP_START_MASK  0xE0
+#define MT_FLAGS_HOP_START_SHIFT 5
+
+// Port numbers we care about; everything else is counted and dropped.
+#define MT_PORTNUM_TEXT_MESSAGE 1
+#define MT_PORTNUM_POSITION     3
+#define MT_PORTNUM_NODEINFO     4
+#define MT_PORTNUM_TELEMETRY    67
+
+typedef struct {
+    uint32_t to;
+    uint32_t from;
+    uint32_t id;
+    uint8_t  flags;
+    uint8_t  channel_hash;
+    uint8_t  next_hop;
+    uint8_t  relay_node;
+
+    uint8_t  hop_limit;
+    uint8_t  hop_start;
+
+    uint8_t  payload_length;
+    uint8_t  payload[MT_MAX_PAYLOAD_SIZE];  // still encrypted at this point
+} mt_packet_t;
+
+// Split a received frame into header + ciphertext. False if it is too short to
+// be a Meshtastic packet at all.
+bool mt_packet_parse(const uint8_t* data, uint8_t size, mt_packet_t* out);
+
+// Hops actually taken = hop_start - hop_limit, or 0 when hop_start is unset
+// (older senders leave it zero).
+uint8_t mt_hops_taken(const mt_packet_t* pkt);
+
+typedef struct {
+    uint32_t portnum;
+    uint8_t  payload[MT_MAX_PAYLOAD_SIZE];
+    size_t   payload_length;
+} mt_data_t;
+
+// Minimal protobuf reader for the Data submessage: field 1 varint portnum,
+// field 2 bytes payload. Everything else is skipped by wire type.
+//
+// This doubles as the "is the key right" test. AES-CTR never fails loudly, so a
+// wrong channel key yields random bytes; strict parsing is what rejects them.
+bool mt_data_parse(const uint8_t* buf, size_t len, mt_data_t* out);
+
+const char* mt_portnum_name(uint32_t portnum);

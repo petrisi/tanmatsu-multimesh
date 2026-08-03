@@ -1,0 +1,51 @@
+# Upstream repositories cloned for reference only — never vendored into this project.
+# Contains GPL-3.0 code (meshtastic-firmware); keep it out of the tree.
+/reference/
+
+# Third-party tooling, reproducible from upstream releases:
+#   tools.zip from badgeteam/esp32-component-badgelink releases
+#   + libusb-1.0.dll (VS2022 MS64) from libusb/libusb releases
+#   + a local venv
+/tools/badgelink/
+
+# Machine-local ESP-IDF location markers (read by the upstream Makefiles)
+.IDF_PATH
+.IDF_TOOLS_PATH
+
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+# Generated per-device from sdkconfigs/general + sdkconfigs/<device>; those two
+# ARE tracked, the merged result is not.
+sdkconfig_*
+dependencies.lock
+managed_components/
+*.bin
+*.elf
+*.map
+
+# ESP-IDF / toolchain local environment
+.env
+env
+.vscode/
+!.vscode.template/
+compile_commands.json
+.cache/
+.clangd/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors
+*.swp
+*~
+.idea/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

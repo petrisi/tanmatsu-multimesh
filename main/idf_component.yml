@@ -1,0 +1,11 @@
+dependencies:
+  idf: ">=6.0.2"
+  badgeteam/badge-bsp: "=1.1.0"
+  nicolaielectronics/tanmatsu-wifi: "=1.3.1"
+  robotman2412/pax-gfx: "=2.2.2"
+  # Radio access. lora_init_remote() proxies the SX1262 over the P4<->C6
+  # ESP-HOSTED link, so this rides on the stack tanmatsu-wifi brings up.
+  # >=0.5.5 is required against radio firmware >=v3.4.0: older clients sized
+  # their GET_CONFIG response buffer for a smaller config struct and hard-fail
+  # with ESP_ERR_INVALID_SIZE.
+  nicolaielectronics/tanmatsu-lora: "^0.6.0"
