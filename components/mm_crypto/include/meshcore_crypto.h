@@ -34,3 +34,14 @@ typedef struct {
 // split the plaintext into timestamp[4] | text_type[1] | text[...].
 // Returns false without writing plaintext when the MAC does not match.
 bool mc_grp_decrypt(const mc_grp_txt_t* grp, const uint8_t key[MC_CIPHER_KEY_SIZE], mc_grp_msg_t* out);
+
+// The inverse. `plain` must already be padded to a 16-byte multiple; ECB has no
+// notion of a partial block. Writes `padded_len` bytes of ciphertext and the
+// full 32-byte HMAC, of which the wire keeps the first MC_CIPHER_MAC_SIZE.
+bool mc_grp_encrypt(const uint8_t key[MC_CIPHER_KEY_SIZE], const uint8_t* plain, size_t padded_len,
+                    uint8_t* out_cipher, uint8_t out_mac[32]);
+
+// Frame a channel message into the padded plaintext the wire expects:
+//   timestamp[4] | text_type[1] | text[...]  zero-padded to a 16-byte multiple.
+// Returns the padded length, or 0 if the text does not fit.
+size_t mc_grp_frame_plaintext(uint32_t timestamp, const char* text, uint8_t* out, size_t out_max);

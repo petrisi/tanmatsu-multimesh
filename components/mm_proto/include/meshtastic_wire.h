@@ -66,4 +66,17 @@ typedef struct {
 // wrong channel key yields random bytes; strict parsing is what rejects them.
 bool mt_data_parse(const uint8_t* buf, size_t len, mt_data_t* out);
 
+// Encode a Data submessage: field 1 varint portnum, field 2 bytes payload.
+// Returns the encoded length, or 0 if it will not fit.
+size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint8_t* out, size_t out_max);
+
+// Assemble a complete frame: the 16-byte header followed by already-encrypted
+// payload. Returns the frame length, or 0 if it will not fit.
+//
+// `hop_limit` is written to both the limit and the start field: a receiver
+// computes hops taken as start minus limit, so leaving start at zero makes the
+// hop count unreadable for everyone downstream.
+uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_limit, uint8_t channel_hash,
+                        const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max);
+
 const char* mt_portnum_name(uint32_t portnum);

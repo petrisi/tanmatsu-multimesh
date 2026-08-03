@@ -57,6 +57,26 @@ static bool hmac_sha256(const uint8_t* key, size_t key_len, const uint8_t* data,
     return status == PSA_SUCCESS && mac_len == 32;
 }
 
+static bool aes_ecb_encrypt(const uint8_t key[MC_CIPHER_KEY_SIZE], const uint8_t* in, size_t len, uint8_t* out,
+                            size_t out_size) {
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_ENCRYPT);
+    psa_set_key_algorithm(&attributes, PSA_ALG_ECB_NO_PADDING);
+    psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attributes, MC_CIPHER_KEY_SIZE * 8);
+
+    psa_key_id_t key_id = PSA_KEY_ID_NULL;
+    if (psa_import_key(&attributes, key, MC_CIPHER_KEY_SIZE, &key_id) != PSA_SUCCESS) return false;
+
+    size_t       out_len = 0;
+    psa_status_t status  = psa_cipher_encrypt(key_id, PSA_ALG_ECB_NO_PADDING, in, len, out, out_size, &out_len);
+    psa_destroy_key(key_id);
+
+    // ECB carries no IV, so the output must be exactly as long as the input.
+    // Anything else means the mode is not doing what this code assumes.
+    return status == PSA_SUCCESS && out_len == len;
+}
+
 // AES-128-ECB decrypt in place-ish: `in` -> `out`, length must be a block multiple.
 static bool aes_ecb_decrypt(const uint8_t key[MC_CIPHER_KEY_SIZE], const uint8_t* in, size_t len, uint8_t* out,
                             size_t out_size) {
@@ -74,6 +94,35 @@ static bool aes_ecb_decrypt(const uint8_t key[MC_CIPHER_KEY_SIZE], const uint8_t
     psa_destroy_key(key_id);
 
     return status == PSA_SUCCESS && out_len == len;
+}
+
+size_t mc_grp_frame_plaintext(uint32_t timestamp, const char* text, uint8_t* out, size_t out_max) {
+    if (text == NULL || out == NULL) return 0;
+
+    size_t text_len  = strlen(text);
+    size_t plain_len = 4 + 1 + text_len;
+    // Round up to a whole cipher block; the tail is left zeroed, which the
+    // receiver's NUL-terminated read of the text treats as the end of it.
+    size_t padded = ((plain_len + MC_CIPHER_BLOCK - 1) / MC_CIPHER_BLOCK) * MC_CIPHER_BLOCK;
+    if (padded > out_max || padded > MC_MAX_PAYLOAD_SIZE) return 0;
+
+    memset(out, 0, padded);
+    memcpy(out, &timestamp, 4);
+    out[4] = 0;  // text_type: a normal message
+    memcpy(&out[5], text, text_len);
+    return padded;
+}
+
+bool mc_grp_encrypt(const uint8_t key[MC_CIPHER_KEY_SIZE], const uint8_t* plain, size_t padded_len,
+                    uint8_t* out_cipher, uint8_t out_mac[32]) {
+    if (key == NULL || plain == NULL || out_cipher == NULL || out_mac == NULL) return false;
+    if (padded_len == 0 || (padded_len % MC_CIPHER_BLOCK) != 0) return false;
+
+    if (!aes_ecb_encrypt(key, plain, padded_len, out_cipher, padded_len)) return false;
+    // The MAC covers the ciphertext, not the plaintext: the receiver checks it
+    // before attempting to decrypt, which is what makes a wrong channel key a
+    // cheap rejection rather than a garbage message.
+    return hmac_sha256(key, MC_CIPHER_KEY_SIZE, out_cipher, padded_len, out_mac);
 }
 
 bool mc_grp_decrypt(const mc_grp_txt_t* grp, const uint8_t key[MC_CIPHER_KEY_SIZE], mc_grp_msg_t* out) {

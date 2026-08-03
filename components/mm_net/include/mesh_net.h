@@ -36,7 +36,21 @@ typedef struct mesh_net_s {
 
     // Decode one frame into `mesh`, updating its counters. Returns true when a
     // displayable message was added, so the caller can notify.
+    //
+    // Also recognises our own transmission arriving back off a repeater and
+    // credits it to the originating message, which is what the delivery
+    // indicator counts. That match has to happen here because only the stack
+    // knows what identifies one of its frames.
     bool (*handle)(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh);
+
+    // Build a transmittable frame for `text` on `channel`, attributed to
+    // `identity`. `msg_seq` is the message this frame belongs to, so repeats
+    // heard later can be credited to it.
+    //
+    // Returns the frame length, or 0 when the text will not fit or the channel
+    // has no usable key.
+    uint8_t (*encode)(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, const char* text,
+                      uint32_t msg_seq, uint8_t* out, size_t out_max);
 } mesh_net_t;
 
 extern const mesh_net_t mesh_net_meshcore;

@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "dedup.h"
 #include "esp_log.h"
 #include "mesh_net.h"
@@ -16,6 +17,65 @@ static const char TAG[] = "net_mc";
 static uint32_t adverts = 0;
 static uint32_t grp_txt = 0;
 static dedup_t  seen;
+
+// Frames we transmitted, still listening for a repeater to echo them back.
+// A channel broadcast has no destination to filter on, so without this our own
+// flood would come back and be shown as though a stranger had sent it.
+#define MAX_PENDING_TX 4
+
+typedef struct {
+    bool     active;
+    uint8_t  key[DEDUP_KEY_LEN];
+    uint32_t seq;  // the message this frame belongs to
+} pending_tx_t;
+
+static pending_tx_t pending[MAX_PENDING_TX];
+
+static void track_transmission(const uint8_t* payload, uint8_t payload_len, uint32_t seq) {
+    int slot = 0;
+    for (int i = 0; i < MAX_PENDING_TX; i++) {
+        if (!pending[i].active) {
+            slot = i;
+            break;
+        }
+        // Full: replace the oldest, which is the lowest sequence number.
+        if (pending[i].seq < pending[slot].seq) slot = i;
+    }
+
+    memset(&pending[slot], 0, sizeof(pending[slot]));
+    pending[slot].active = true;
+    pending[slot].seq    = seq;
+    size_t n = payload_len < DEDUP_KEY_LEN ? payload_len : DEDUP_KEY_LEN;
+    memcpy(pending[slot].key, payload, n);
+
+    // Also record it as seen, so the echo is suppressed as a duplicate rather
+    // than decrypted and displayed a second time.
+    dedup_remember(&seen, payload, payload_len);
+}
+
+// Credit a repeat to the message that produced it. Returns true if this frame
+// was one of ours.
+static bool credit_repeat(mesh_state_t* mesh, const uint8_t* payload, uint8_t payload_len) {
+    uint8_t probe[DEDUP_KEY_LEN] = {0};
+    size_t  n                    = payload_len < DEDUP_KEY_LEN ? payload_len : DEDUP_KEY_LEN;
+    memcpy(probe, payload, n);
+
+    for (int i = 0; i < MAX_PENDING_TX; i++) {
+        if (!pending[i].active || memcmp(pending[i].key, probe, DEDUP_KEY_LEN) != 0) continue;
+
+        for (int m = 0; m < mesh->count; m++) {
+            message_t* msg = (message_t*)model_message_at(mesh, m);
+            if (msg && msg->used && msg->seq == pending[i].seq) {
+                if (msg->repeats < 255) msg->repeats++;
+                return true;
+            }
+        }
+        // The message aged out of the ring; stop tracking it.
+        pending[i].active = false;
+        return true;
+    }
+    return false;
+}
 
 static bool meshcore_init(void) {
     dedup_reset(&seen);
@@ -80,6 +140,9 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
     // payload is byte-identical, so fingerprint that.
     if (dedup_check(&seen, packet.payload, packet.payload_length)) {
         mesh->stats.duplicates++;
+        // A repeat of something we sent is not noise: it is the only delivery
+        // confirmation this network offers for a channel broadcast.
+        credit_repeat(mesh, packet.payload, packet.payload_length);
         detail(mesh);
         return false;
     }
@@ -140,6 +203,36 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
     return false;
 }
 
+static uint8_t meshcore_encode(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, const char* text,
+                               uint32_t msg_seq, uint8_t* out, size_t out_max) {
+    if (channel >= mesh->channel_count) return 0;
+    const channel_t* ch = &mesh->channels[channel];
+    if (!ch->ready) return 0;
+
+    // MeshCore has no identity field on the wire: the sender's name is carried
+    // inside the message text, by convention, as "Name: message".
+    char prefixed[TEXT_MAX];
+    snprintf(prefixed, sizeof(prefixed), "%s: %s", identity->name, text);
+
+    uint8_t plain[MC_MAX_PAYLOAD_SIZE];
+    size_t  padded = mc_grp_frame_plaintext((uint32_t)time(NULL), prefixed, plain, sizeof(plain));
+    if (padded == 0) return 0;
+
+    uint8_t cipher[MC_MAX_PAYLOAD_SIZE];
+    uint8_t mac[32];
+    if (!mc_grp_encrypt(ch->key, plain, padded, cipher, mac)) return 0;
+
+    uint8_t payload[MC_MAX_PAYLOAD_SIZE];
+    uint8_t payload_len = mc_grp_txt_build(ch->hash, mac, cipher, (uint8_t)padded, payload, sizeof(payload));
+    if (payload_len == 0) return 0;
+
+    uint8_t len = mc_packet_build(MC_PAYLOAD_GRP_TXT, MC_ROUTE_FLOOD, payload, payload_len, out, out_max);
+    if (len == 0) return 0;
+
+    track_transmission(payload, payload_len, msg_seq);
+    return len;
+}
+
 const mesh_net_t mesh_net_meshcore = {
     .name            = "MeshCore",
     .tag             = "MC",
@@ -147,4 +240,5 @@ const mesh_net_t mesh_net_meshcore = {
     .get_config      = meshcore_get_config,
     .prepare_channel = meshcore_prepare_channel,
     .handle          = meshcore_handle,
+    .encode          = meshcore_encode,
 };

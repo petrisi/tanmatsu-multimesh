@@ -36,3 +36,15 @@ uint8_t mt_channel_hash(const char* name, const mt_key_t* key);
 // little-endian value, then the sender node number as 32-bit little-endian,
 // then four zero bytes.
 bool mt_decrypt(const mt_key_t* key, uint32_t from_node, uint32_t packet_id, uint8_t* data, size_t length);
+
+// CTR is its own inverse, so this is the same operation under a different name.
+// It exists so the transmit path does not read as though it decrypts.
+//
+// `packet_id` MUST be unique per (key, node): it is half the counter block, and
+// reusing one reuses keystream. Two messages XORed together are recoverable
+// plaintext, so the id has to come from a hardware RNG rather than a counter
+// that restarts at boot.
+static inline bool mt_encrypt(const mt_key_t* key, uint32_t from_node, uint32_t packet_id, uint8_t* data,
+                              size_t length) {
+    return mt_decrypt(key, from_node, packet_id, data, length);
+}

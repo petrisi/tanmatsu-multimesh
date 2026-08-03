@@ -37,6 +37,14 @@ void radio_drain(void);
 // Poll for one received frame. `timeout_ms` of 0 returns immediately.
 bool radio_receive(lora_protocol_lora_packet_t* out, uint32_t timeout_ms);
 
+// Transmit one frame. BLOCKS until the packet has left the antenna -- around
+// half a second for a short message at SF8/BW62.5 -- so this must only ever be
+// called from a worker task, never from the loop that draws the screen.
+//
+// Performs a best-effort listen-before-talk first; see radio.c for why "best
+// effort" is the honest description.
+bool radio_send(const uint8_t* data, uint8_t length);
+
 // Radio firmware version reported by the C6, for diagnostics. Empty until
 // radio_start() has succeeded.
 const char* radio_firmware_version(void);

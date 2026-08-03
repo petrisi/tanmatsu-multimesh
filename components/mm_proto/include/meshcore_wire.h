@@ -70,5 +70,16 @@ typedef struct {
 bool mc_packet_parse(const uint8_t* data, uint8_t size, mc_packet_t* out);
 bool mc_grp_txt_parse(const uint8_t* payload, uint8_t size, mc_grp_txt_t* out);
 
+// Assemble a GRP_TXT payload: channel_hash[1] | mac[2] | ciphertext[...].
+// Returns the payload length, or 0 if it will not fit.
+uint8_t mc_grp_txt_build(uint8_t channel_hash, const uint8_t mac[MC_CIPHER_MAC_SIZE], const uint8_t* cipher,
+                         uint8_t cipher_len, uint8_t* out, size_t out_max);
+
+// Assemble a complete frame for transmission. Originated messages carry no path
+// (zero hops); repeaters append to it as the packet travels.
+// Returns the frame length, or 0 if it will not fit.
+uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, const uint8_t* payload, uint8_t payload_len,
+                        uint8_t* out, size_t out_max);
+
 // Human-readable payload type, for the traffic counters on screen.
 const char* mc_payload_type_name(mc_payload_type_t type);

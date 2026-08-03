@@ -16,6 +16,7 @@
 #include <string.h>
 #include "dedup.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "mesh_net.h"
 #include "meshtastic_crypto.h"
 #include "meshtastic_wire.h"
@@ -34,8 +35,72 @@ static uint32_t text_msgs   = 0;
 static uint32_t other_ports = 0;
 static dedup_t  seen;
 
+// Frames we transmitted, still listening for a repeater to echo them back. A
+// broadcast has no destination to filter on, so without this our own message
+// would come back and be shown as though a stranger had sent it.
+#define MAX_PENDING_TX 4
+
+typedef struct {
+    bool     active;
+    uint32_t from;
+    uint32_t id;
+    uint32_t seq;  // the message this frame belongs to
+} pending_tx_t;
+
+static pending_tx_t pending[MAX_PENDING_TX];
+
+// The dedup key for a Meshtastic frame: the (from, id) header pair.
+static void tx_key(uint32_t from, uint32_t id, uint8_t out[8]) {
+    out[0] = (uint8_t)from;
+    out[1] = (uint8_t)(from >> 8);
+    out[2] = (uint8_t)(from >> 16);
+    out[3] = (uint8_t)(from >> 24);
+    out[4] = (uint8_t)id;
+    out[5] = (uint8_t)(id >> 8);
+    out[6] = (uint8_t)(id >> 16);
+    out[7] = (uint8_t)(id >> 24);
+}
+
+static void track_transmission(uint32_t from, uint32_t id, uint32_t seq) {
+    int slot = 0;
+    for (int i = 0; i < MAX_PENDING_TX; i++) {
+        if (!pending[i].active) {
+            slot = i;
+            break;
+        }
+        if (pending[i].seq < pending[slot].seq) slot = i;  // replace the oldest
+    }
+
+    pending[slot] = (pending_tx_t){.active = true, .from = from, .id = id, .seq = seq};
+
+    // Record it as seen, so the echo is suppressed rather than displayed twice.
+    uint8_t key[8];
+    tx_key(from, id, key);
+    dedup_remember(&seen, key, sizeof(key));
+}
+
+// Credit a repeat to the message that produced it. Returns true if this frame
+// was one of ours.
+static bool credit_repeat(mesh_state_t* mesh, uint32_t from, uint32_t id) {
+    for (int i = 0; i < MAX_PENDING_TX; i++) {
+        if (!pending[i].active || pending[i].from != from || pending[i].id != id) continue;
+
+        for (int m = 0; m < mesh->count; m++) {
+            message_t* msg = (message_t*)model_message_at(mesh, m);
+            if (msg && msg->used && msg->seq == pending[i].seq) {
+                if (msg->repeats < 255) msg->repeats++;
+                return true;
+            }
+        }
+        pending[i].active = false;  // the message aged out of the ring
+        return true;
+    }
+    return false;
+}
+
 static bool meshtastic_init(void) {
     dedup_reset(&seen);
+    memset(pending, 0, sizeof(pending));
     return true;
 }
 
@@ -116,13 +181,13 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
     // every repeater. (from, id) identifies it: the payload is unchanged by a
     // relay but the flags and relay_node byte are not, so keying on the header
     // pair is both cheaper and more accurate than fingerprinting bytes.
-    uint8_t key[8] = {
-        (uint8_t)packet.from,       (uint8_t)(packet.from >> 8), (uint8_t)(packet.from >> 16),
-        (uint8_t)(packet.from >> 24), (uint8_t)packet.id,        (uint8_t)(packet.id >> 8),
-        (uint8_t)(packet.id >> 16), (uint8_t)(packet.id >> 24),
-    };
+    uint8_t key[8];
+    tx_key(packet.from, packet.id, key);
     if (dedup_check(&seen, key, sizeof(key))) {
         mesh->stats.duplicates++;
+        // A repeat of something we sent is not noise: it is the only delivery
+        // confirmation available for a broadcast.
+        credit_repeat(mesh, packet.from, packet.id);
         detail(mesh);
         return false;
     }
@@ -181,6 +246,39 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
     return false;
 }
 
+#define MT_BROADCAST_ADDR 0xFFFFFFFFu
+#define MT_DEFAULT_HOPS   3
+
+static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, const char* text,
+                                 uint32_t msg_seq, uint8_t* out, size_t out_max) {
+    if (channel >= mesh->channel_count) return 0;
+    const channel_t* ch = &mesh->channels[channel];
+    if (!ch->ready) return 0;
+
+    uint8_t payload[MT_MAX_PAYLOAD_SIZE];
+    size_t  payload_len = mt_data_encode(MT_PORTNUM_TEXT_MESSAGE, (const uint8_t*)text, strlen(text), payload,
+                                         sizeof(payload));
+    if (payload_len == 0) return 0;
+
+    // The packet id is half the AES-CTR nonce. Reusing one under the same
+    // channel key reuses keystream, and two messages XORed together are
+    // recoverable plaintext -- so this must come from the hardware RNG and never
+    // from a counter that restarts at boot.
+    uint32_t id = esp_random();
+    if (id == 0) id = 1;  // zero is reserved for "no id"
+
+    mt_key_t key = {.length = ch->key_len};
+    memcpy(key.bytes, ch->key, ch->key_len);
+    if (!mt_encrypt(&key, identity->node_num, id, payload, payload_len)) return 0;
+
+    uint8_t len = mt_packet_build(MT_BROADCAST_ADDR, identity->node_num, id, MT_DEFAULT_HOPS, ch->hash, payload,
+                                  (uint8_t)payload_len, out, out_max);
+    if (len == 0) return 0;
+
+    track_transmission(identity->node_num, id, msg_seq);
+    return len;
+}
+
 const mesh_net_t mesh_net_meshtastic = {
     .name            = "Meshtastic",
     .tag             = "MT",
@@ -188,4 +286,5 @@ const mesh_net_t mesh_net_meshtastic = {
     .get_config      = meshtastic_get_config,
     .prepare_channel = meshtastic_prepare_channel,
     .handle          = meshtastic_handle,
+    .encode          = meshtastic_encode,
 };

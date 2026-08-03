@@ -72,6 +72,37 @@ bool mc_grp_txt_parse(const uint8_t* payload, uint8_t size, mc_grp_txt_t* out) {
     return true;
 }
 
+uint8_t mc_grp_txt_build(uint8_t channel_hash, const uint8_t mac[MC_CIPHER_MAC_SIZE], const uint8_t* cipher,
+                         uint8_t cipher_len, uint8_t* out, size_t out_max) {
+    if (out == NULL || mac == NULL || cipher == NULL) return 0;
+
+    size_t total = 1 + MC_CIPHER_MAC_SIZE + cipher_len;
+    if (total > out_max || total > MC_MAX_PAYLOAD_SIZE) return 0;
+
+    out[0] = channel_hash;
+    memcpy(&out[1], mac, MC_CIPHER_MAC_SIZE);
+    memcpy(&out[1 + MC_CIPHER_MAC_SIZE], cipher, cipher_len);
+    return (uint8_t)total;
+}
+
+uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, const uint8_t* payload, uint8_t payload_len,
+                        uint8_t* out, size_t out_max) {
+    if (out == NULL || payload == NULL) return 0;
+    if (payload_len > MC_MAX_PAYLOAD_SIZE) return 0;
+
+    // header + path control byte + payload. A packet we originate has no path,
+    // so no transport codes and no hop bytes.
+    size_t total = 1 + 1 + payload_len;
+    if (total > out_max) return 0;
+
+    out[0] = (uint8_t)(((route & HDR_ROUTE_MASK) << HDR_ROUTE_SHIFT) | ((type & HDR_TYPE_MASK) << HDR_TYPE_SHIFT));
+    // Upper two bits are bytes-per-hop minus one, lower six the hop count: one
+    // byte per hop, zero hops so far.
+    out[1] = 0x00;
+    memcpy(&out[2], payload, payload_len);
+    return (uint8_t)total;
+}
+
 const char* mc_payload_type_name(mc_payload_type_t type) {
     switch (type) {
         case MC_PAYLOAD_REQ: return "REQ";

@@ -116,6 +116,75 @@ bool mt_data_parse(const uint8_t* buf, size_t len, mt_data_t* out) {
     return saw_portnum;
 }
 
+static size_t write_varint(uint8_t* out, size_t out_max, uint64_t value) {
+    size_t n = 0;
+    do {
+        if (n >= out_max) return 0;
+        uint8_t byte = value & 0x7F;
+        value >>= 7;
+        if (value) byte |= 0x80;
+        out[n++] = byte;
+    } while (value);
+    return n;
+}
+
+size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint8_t* out, size_t out_max) {
+    if (out == NULL || payload == NULL) return 0;
+
+    size_t pos = 0;
+
+    // Field 1, wire type 0: portnum.
+    size_t n = write_varint(&out[pos], out_max - pos, (1 << 3) | 0);
+    if (n == 0) return 0;
+    pos += n;
+    n = write_varint(&out[pos], out_max - pos, portnum);
+    if (n == 0) return 0;
+    pos += n;
+
+    // Field 2, wire type 2: the message bytes.
+    n = write_varint(&out[pos], out_max - pos, (2 << 3) | 2);
+    if (n == 0) return 0;
+    pos += n;
+    n = write_varint(&out[pos], out_max - pos, payload_len);
+    if (n == 0) return 0;
+    pos += n;
+
+    if (pos + payload_len > out_max) return 0;
+    memcpy(&out[pos], payload, payload_len);
+    return pos + payload_len;
+}
+
+uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_limit, uint8_t channel_hash,
+                        const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max) {
+    if (out == NULL || payload == NULL) return 0;
+
+    size_t total = MT_HEADER_SIZE + payload_len;
+    if (total > out_max || payload_len > MT_MAX_PAYLOAD_SIZE) return 0;
+
+    // All multi-byte header fields are little endian on the wire.
+    out[0] = (uint8_t)to;
+    out[1] = (uint8_t)(to >> 8);
+    out[2] = (uint8_t)(to >> 16);
+    out[3] = (uint8_t)(to >> 24);
+    out[4] = (uint8_t)from;
+    out[5] = (uint8_t)(from >> 8);
+    out[6] = (uint8_t)(from >> 16);
+    out[7] = (uint8_t)(from >> 24);
+    out[8]  = (uint8_t)id;
+    out[9]  = (uint8_t)(id >> 8);
+    out[10] = (uint8_t)(id >> 16);
+    out[11] = (uint8_t)(id >> 24);
+
+    out[12] = (uint8_t)((hop_limit & MT_FLAGS_HOP_LIMIT_MASK) |
+                        ((hop_limit << MT_FLAGS_HOP_START_SHIFT) & MT_FLAGS_HOP_START_MASK));
+    out[13] = channel_hash;
+    out[14] = 0;  // next_hop: unset, this is a broadcast
+    out[15] = 0;  // relay_node: filled in by whoever relays us
+
+    memcpy(&out[MT_HEADER_SIZE], payload, payload_len);
+    return (uint8_t)total;
+}
+
 const char* mt_portnum_name(uint32_t portnum) {
     switch (portnum) {
         case MT_PORTNUM_TEXT_MESSAGE: return "text";

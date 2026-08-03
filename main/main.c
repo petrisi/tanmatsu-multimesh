@@ -43,6 +43,115 @@ static const mesh_net_t* const nets[MESH_COUNT] = {
     [MESH_MT] = &mesh_net_meshtastic,
 };
 
+static uint32_t now_ms(void);
+static void     toast(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
+// --- transmit ------------------------------------------------------------
+//
+// radio_send() blocks for the full airtime of the packet, so it runs on its own
+// task. The model stays single-threaded: the worker never touches it, it only
+// reports back through a queue that the event loop drains.
+
+#define TX_QUEUE_DEPTH 4
+
+typedef struct {
+    mesh_id_t mesh;
+    uint32_t  seq;  // the message this frame belongs to
+    uint8_t   frame[256];
+    uint8_t   length;
+} tx_request_t;
+
+typedef enum { TX_EVENT_SENDING, TX_EVENT_SENT, TX_EVENT_FAILED } tx_event_kind_t;
+
+typedef struct {
+    mesh_id_t       mesh;
+    uint32_t        seq;
+    tx_event_kind_t kind;
+} tx_event_t;
+
+static QueueHandle_t tx_requests;
+static QueueHandle_t tx_events;
+
+static void tx_worker(void* arg) {
+    (void)arg;
+    tx_request_t request;
+
+    while (xQueueReceive(tx_requests, &request, portMAX_DELAY) == pdTRUE) {
+        tx_event_t event = {.mesh = request.mesh, .seq = request.seq, .kind = TX_EVENT_SENDING};
+        xQueueSend(tx_events, &event, 0);
+
+        bool ok    = radio_send(request.frame, request.length);
+        event.kind = ok ? TX_EVENT_SENT : TX_EVENT_FAILED;
+        xQueueSend(tx_events, &event, portMAX_DELAY);
+    }
+}
+
+// Locate a message by sequence number so a worker report can be applied to it.
+static message_t* find_message(mesh_id_t id, uint32_t seq) {
+    mesh_state_t* mesh = &model.mesh[id];
+    for (int i = 0; i < mesh->count; i++) {
+        message_t* msg = (message_t*)model_message_at(mesh, i);
+        if (msg && msg->used && msg->seq == seq) return msg;
+    }
+    return NULL;
+}
+
+static bool drain_tx_events(void) {
+    bool       changed = false;
+    tx_event_t event;
+
+    while (xQueueReceive(tx_events, &event, 0) == pdTRUE) {
+        message_t* msg = find_message(event.mesh, event.seq);
+        if (msg == NULL) continue;
+
+        switch (event.kind) {
+            case TX_EVENT_SENDING:
+                msg->tx     = TX_SENDING;
+                model.radio = RADIO_TX;
+                break;
+            case TX_EVENT_SENT:
+                // On the air. Now wait to hear a repeater echo it back, which is
+                // the only delivery signal a broadcast gets.
+                msg->tx         = TX_AWAITING;
+                msg->tx_tick_ms = now_ms();
+                model.radio     = RADIO_RX;
+                break;
+            case TX_EVENT_FAILED:
+                msg->tx     = TX_FAILED;
+                model.radio = RADIO_RX;
+                toast("send failed");
+                break;
+        }
+        changed = true;
+    }
+    return changed;
+}
+
+// The window has to outlast a multi-hop repeat: one transmission is roughly half
+// a second at SF8/BW62.5, plus each repeater's backoff. Too short and a quiet
+// moment looks like a failure.
+#define TX_REPEAT_WINDOW_MS 60000
+
+static bool tx_settle(void) {
+    bool changed = false;
+
+    for (int m = 0; m < MESH_COUNT; m++) {
+        mesh_state_t* mesh = &model.mesh[m];
+        for (int i = 0; i < MAX_MESSAGES; i++) {
+            message_t* msg = &mesh->messages[i];
+            if (!msg->used || msg->tx != TX_AWAITING) continue;
+            if (now_ms() - msg->tx_tick_ms < TX_REPEAT_WINDOW_MS) continue;
+
+            // Heard repeated at least once means it reached the mesh. Silence
+            // means nobody relayed it -- which is not proof it was unheard, only
+            // that nothing confirmed it.
+            msg->tx = msg->repeats > 0 ? TX_CONFIRMED : TX_FAILED;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 #define TOAST_MS 1800
 
 static uint32_t now_ms(void) {
@@ -172,14 +281,44 @@ static void composer_send(void) {
         return;
     }
 
-    // Remember it either way: ctrl+up recalls what you have composed, and
-    // losing a long message to a refused send would be worse than the refusal.
-    history_push(model.composer);
+    if (!radio_is_ready()) {
+        toast("radio unavailable");
+        return;
+    }
 
-    // The encode-and-transmit path is not built yet. Refuse plainly rather than
-    // echoing the message locally and letting a delivery indicator imply it
-    // went out.
-    toast("transmit not implemented yet");
+    mesh_state_t* mesh = model_active(&model);
+    if (mesh->channel_count == 0) {
+        toast("no channel to send on");
+        return;
+    }
+
+    // The local echo goes in first so the message has a sequence number for the
+    // encoder to attach repeats to, and so the user sees it immediately rather
+    // than after the radio has finished.
+    message_t* msg = model_push(mesh, (uint8_t)mesh->input_channel, model.identity.name, true, model.composer, true);
+    msg->tx        = TX_QUEUED;
+    msg->tx_tick_ms = now_ms();
+
+    tx_request_t request = {.mesh = model.active, .seq = msg->seq};
+    request.length = nets[model.active]->encode(mesh, (uint8_t)mesh->input_channel, &model.identity, model.composer,
+                                                msg->seq, request.frame, sizeof(request.frame));
+    if (request.length == 0) {
+        msg->tx = TX_FAILED;
+        toast("could not encode message");
+        return;
+    }
+
+    if (xQueueSend(tx_requests, &request, 0) != pdTRUE) {
+        msg->tx = TX_FAILED;
+        toast("transmit queue full");
+        return;
+    }
+
+    history_push(model.composer);
+    composer_set("");
+
+    mesh->pinned = true;  // jump back to live on send
+    mesh->unseen = 0;
 }
 
 // --- navigation ----------------------------------------------------------
@@ -719,6 +858,13 @@ void app_main(void) {
     leds_init();
     leds_set_mesh(model_active(&model)->accent);
 
+    tx_requests = xQueueCreate(TX_QUEUE_DEPTH, sizeof(tx_request_t));
+    tx_events   = xQueueCreate(TX_QUEUE_DEPTH * 3, sizeof(tx_event_t));
+    if (tx_requests == NULL || tx_events == NULL) {
+        ESP_LOGE(TAG, "transmit queues could not be allocated");
+        return;
+    }
+
     ui_boot_line("Starting radio...");
     if (radio_start()) {
         // The P4 has no RTC; the clock lives on the C6 and the link has to be up
@@ -726,6 +872,12 @@ void app_main(void) {
         model.time_synced = (bsp_rtc_update_time() == ESP_OK);
         if (!model.time_synced) ESP_LOGW(TAG, "clock not available from the coprocessor");
         apply_active_net();
+
+        // Priority below the UI loop: a blocked transmit must never delay input
+        // handling or drawing.
+        if (xTaskCreate(tx_worker, "mm_tx", 4096, NULL, 4, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "transmit worker could not be started");
+        }
     } else {
         // Still usable: channels and identity can be configured with no radio.
         model.radio = RADIO_ERROR;
@@ -787,6 +939,8 @@ void app_main(void) {
         }
 
         if (radio_poll()) dirty = true;
+        if (drain_tx_events()) dirty = true;
+        if (tx_settle()) dirty = true;
         leds_tick();
 
         if (model.toast[0] && (int32_t)(now_ms() - model.toast_until_ms) >= 0) {

@@ -3,6 +3,7 @@
 #include "radio.h"
 #include <string.h>
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "wifi_connection.h"
@@ -98,4 +99,51 @@ void radio_drain(void) {
 bool radio_receive(lora_protocol_lora_packet_t* out, uint32_t timeout_ms) {
     if (!ready || out == NULL) return false;
     return lora_receive_packet(&handle, out, pdMS_TO_TICKS(timeout_ms)) == ESP_OK;
+}
+
+// Listen-before-talk.
+//
+// Best effort, and the limitation is fundamental rather than an implementation
+// shortcut: LoRa demodulates several dB below the noise floor, so a
+// transmission that is perfectly readable can sit under the RSSI we measure.
+// This catches a strong nearby signal and nothing subtler. Proper channel
+// activity detection would be the right primitive; the remote protocol does not
+// expose it.
+#define LBT_BUSY_DBM   -95
+#define LBT_ATTEMPTS   6
+#define LBT_BACKOFF_MS 120
+
+static bool channel_is_clear(void) {
+    float rssi = 0;
+    if (lora_get_rssi_inst(&handle, &rssi) != ESP_OK) {
+        // Unable to measure: transmit rather than block the user forever.
+        return true;
+    }
+    return rssi < LBT_BUSY_DBM;
+}
+
+bool radio_send(const uint8_t* data, uint8_t length) {
+    if (!ready || data == NULL || length == 0) return false;
+
+    for (int attempt = 0; attempt < LBT_ATTEMPTS; attempt++) {
+        if (channel_is_clear()) break;
+        if (attempt == LBT_ATTEMPTS - 1) {
+            ESP_LOGW(TAG, "channel busy after %d attempts, transmitting anyway", LBT_ATTEMPTS);
+            break;
+        }
+        // Randomised backoff so two nodes that started talking together do not
+        // stay synchronised through every retry.
+        vTaskDelay(pdMS_TO_TICKS(LBT_BACKOFF_MS + (esp_random() % LBT_BACKOFF_MS)));
+    }
+
+    lora_protocol_lora_packet_t packet = {0};
+    memcpy(packet.data, data, length);
+    packet.length = length;
+
+    esp_err_t res = lora_send_packet(&handle, &packet);
+    if (res != ESP_OK) {
+        ESP_LOGE(TAG, "transmit failed: %s", esp_err_to_name(res));
+        return false;
+    }
+    return true;
 }
