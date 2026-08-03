@@ -102,6 +102,7 @@ typedef struct {
 typedef struct {
     uint32_t packets_total;    // frames handed up by the radio
     uint32_t packets_bad;      // failed to parse as this network's framing
+    uint32_t duplicates;       // flood retransmits of something already seen
     uint32_t not_our_channel;  // parsed, but wrong channel or failed the MAC
     uint32_t messages;         // decoded, displayable messages
     char     detail[72];

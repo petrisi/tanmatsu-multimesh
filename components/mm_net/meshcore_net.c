@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "dedup.h"
 #include "esp_log.h"
 #include "mesh_net.h"
 #include "meshcore_crypto.h"
@@ -14,8 +15,10 @@ static const char TAG[] = "net_mc";
 
 static uint32_t adverts = 0;
 static uint32_t grp_txt = 0;
+static dedup_t  seen;
 
 static bool meshcore_init(void) {
+    dedup_reset(&seen);
     return mc_crypto_init();
 }
 
@@ -58,8 +61,8 @@ static void meshcore_prepare_channel(channel_t* channel) {
 }
 
 static void detail(mesh_state_t* mesh) {
-    snprintf(mesh->stats.detail, sizeof(mesh->stats.detail), "advert:%lu grp:%lu", (unsigned long)adverts,
-             (unsigned long)grp_txt);
+    snprintf(mesh->stats.detail, sizeof(mesh->stats.detail), "advert:%lu grp:%lu dup:%lu", (unsigned long)adverts,
+             (unsigned long)grp_txt, (unsigned long)mesh->stats.duplicates);
 }
 
 static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh) {
@@ -68,6 +71,16 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
     mc_packet_t packet;
     if (!mc_packet_parse(pkt->data, pkt->length, &packet)) {
         mesh->stats.packets_bad++;
+        return false;
+    }
+
+    // MeshCore floods, and the same message arrives once directly and again via
+    // every repeater. There is no packet id to key on, but the header and
+    // transport codes are the only parts that differ between retransmits -- the
+    // payload is byte-identical, so fingerprint that.
+    if (dedup_check(&seen, packet.payload, packet.payload_length)) {
+        mesh->stats.duplicates++;
+        detail(mesh);
         return false;
     }
 

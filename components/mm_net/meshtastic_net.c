@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "dedup.h"
 #include "esp_log.h"
 #include "mesh_net.h"
 #include "meshtastic_crypto.h"
@@ -31,8 +32,10 @@ static const char TAG[] = "net_mt";
 
 static uint32_t text_msgs   = 0;
 static uint32_t other_ports = 0;
+static dedup_t  seen;
 
 static bool meshtastic_init(void) {
+    dedup_reset(&seen);
     return true;
 }
 
@@ -96,8 +99,8 @@ static void meshtastic_prepare_channel(channel_t* channel) {
 }
 
 static void detail(mesh_state_t* mesh) {
-    snprintf(mesh->stats.detail, sizeof(mesh->stats.detail), "text:%lu other:%lu", (unsigned long)text_msgs,
-             (unsigned long)other_ports);
+    snprintf(mesh->stats.detail, sizeof(mesh->stats.detail), "text:%lu other:%lu dup:%lu", (unsigned long)text_msgs,
+             (unsigned long)other_ports, (unsigned long)mesh->stats.duplicates);
 }
 
 static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh) {
@@ -106,6 +109,21 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
     mt_packet_t packet;
     if (!mt_packet_parse(pkt->data, pkt->length, &packet)) {
         mesh->stats.packets_bad++;
+        return false;
+    }
+
+    // Meshtastic floods, so the same message arrives directly and again from
+    // every repeater. (from, id) identifies it: the payload is unchanged by a
+    // relay but the flags and relay_node byte are not, so keying on the header
+    // pair is both cheaper and more accurate than fingerprinting bytes.
+    uint8_t key[8] = {
+        (uint8_t)packet.from,       (uint8_t)(packet.from >> 8), (uint8_t)(packet.from >> 16),
+        (uint8_t)(packet.from >> 24), (uint8_t)packet.id,        (uint8_t)(packet.id >> 8),
+        (uint8_t)(packet.id >> 16), (uint8_t)(packet.id >> 24),
+    };
+    if (dedup_check(&seen, key, sizeof(key))) {
+        mesh->stats.duplicates++;
+        detail(mesh);
         return false;
     }
 
