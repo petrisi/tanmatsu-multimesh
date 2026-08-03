@@ -141,7 +141,7 @@ void ui_boot_line(const char* fmt, ...) {
     if (!have_display) return;
 
     pax_background(&fb, COL_BG);
-    pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, 8, 8, "MeshComms");
+    pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, 8, 8, "MultiMesh");
     pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, 8, 8 + LINE_H * 2, line);
     blit();
 }
@@ -425,7 +425,7 @@ static void draw_status(const app_model_t* model) {
     // The channel sits on its own dark chip: the channel colour would not be
     // reliably legible directly against the mesh accent.
     char label[sizeof(ch->name) + 2];
-    snprintf(label, sizeof(label), "%s%s", ch->name[0] == '#' ? "" : "#", ch->name);
+    snprintf(label, sizeof(label), "%s", ch->name);
     float chip_w = (float)strlen(label) * CHAR_W + 12;
     float chip_x = 8 + 11 * CHAR_W;
     pax_draw_round_rect(&fb, COL_CHIP, chip_x, 3, chip_w, STATUS_H - 6, 4);
@@ -692,7 +692,7 @@ static void draw_picker(const app_model_t* model) {
         pax_draw_rect(&fb, ch->color, bx + 14, y + 4, 10, 10);
 
         char label[CH_NAME_MAX + 2];
-        snprintf(label, sizeof(label), "%s%s", ch->name[0] == '#' ? "" : "#", ch->name);
+        snprintf(label, sizeof(label), "%s", ch->name);
         pax_draw_text(&fb, ch->color, FONT, FONT_SIZE, bx + 32, y, label);
 
         char shown[16];
@@ -720,12 +720,21 @@ static void draw_editor(const app_model_t* model) {
     snprintf(title, sizeof(title), "%s channel - %s", ed->creating ? "New" : "Edit", mesh->name);
     overlay_box(bw, bh, &bx, &by, mesh->accent, title);
 
-    // The secret is the same field on both networks but a different format, so
-    // label it for whichever mesh is active rather than saying "key".
-    const char* labels[FIELD_COUNT] = {
-        "Name", "Short", model->active == MESH_MT ? "PSK b64" : "Key hex", "Colour",
-    };
+    // Both networks carry the key as base64, so the label is the same for each.
+    const char* labels[FIELD_COUNT] = {"Name", "Short", "PSK b64", "Colour"};
     const char* values[FIELD_COUNT] = {ed->name, ed->display, ed->secret, NULL};
+
+    // An empty PSK is meaningful rather than missing, and what it means depends
+    // on the network and the name. Saying so removes the guesswork about whether
+    // a blank field is going to work.
+    const char* secret_hint;
+    if (model->active == MESH_MT) {
+        secret_hint = "(unencrypted)";
+    } else if (ed->name[0] == '#') {
+        secret_hint = "(key derived from name)";
+    } else {
+        secret_hint = "(public channel key)";
+    }
 
     float y = by + 8 + LINE_H * 1.5f;
     for (int f = 0; f < FIELD_COUNT; f++, y += LINE_H) {
@@ -745,7 +754,12 @@ static void draw_editor(const app_model_t* model) {
             const char* shown = values[f];
             int         len   = (int)strlen(shown);
             if (len > room) shown += len - room;
-            pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, shown);
+
+            if (f == FIELD_SECRET && len == 0) {
+                pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, vx, y, secret_hint);
+            } else {
+                pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, shown);
+            }
             if (focused) {
                 int cells = len > room ? room : len;
                 pax_draw_rect(&fb, COL_TEXT, vx + cells * CHAR_W, y + 3, 2, LINE_H - 6);

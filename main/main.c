@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
-// MeshComms — UI prototype.
+// MultiMesh: application entry point and event loop.
 //
-// No radio and no protocol: this build exists to settle layout, colour and key
-// handling on real hardware before any of that is wired back in. The verified
-// receive stacks from the previous milestone are still in the tree
-// (meshcore_*.c, meshtastic_*.c) but are excluded from this build in
-// main/CMakeLists.txt -- their adapters target the old UI API.
-//
-// Everything on screen is mock data. Sent messages walk through the real
-// delivery states on a timer so the timestamp-column indicator can be judged.
+// The loop owns the model and is the only thing that mutates it. Everything that
+// can block -- transmitting, above all -- reports in through a queue rather than
+// reaching into state, so a send in flight cannot race a repaint.
 
 #include <stdio.h>
 #include <string.h>
@@ -386,7 +381,7 @@ static void next_channel(int delta) {
     if (mesh->channel_count == 0) return;
     mesh->input_channel = (mesh->input_channel + delta + mesh->channel_count) % mesh->channel_count;
     settings_save_prefs(&model);
-    toast("sending to #%s", mesh->channels[mesh->input_channel].name);
+    toast("sending to %s", mesh->channels[mesh->input_channel].name);
 }
 
 static void scroll_by(int lines) {
@@ -517,7 +512,7 @@ static void editor_save(void) {
     if (!ch->ready) {
         toast("saved, but the key is unusable");
     } else {
-        toast("saved #%s", ch->name);
+        toast("saved %s", ch->name);
     }
 }
 
@@ -550,7 +545,7 @@ static void editor_delete_confirmed(void) {
     model.overlay      = OVERLAY_PICKER;
     settings_save_channels(&model, model.active);
     settings_save_prefs(&model);
-    toast("deleted #%s", gone);
+    toast("deleted %s", gone);
 }
 
 static char* editor_focused_field(int* out_max) {
@@ -618,7 +613,7 @@ static void handle_editor_key(bsp_input_navigation_key_t key) {
                 if (mesh->channel_count <= 1) {
                     toast("cannot delete the last channel");
                 } else {
-                    snprintf(model.confirm_text, sizeof(model.confirm_text), "Delete #%s?",
+                    snprintf(model.confirm_text, sizeof(model.confirm_text), "Delete %s?",
                              mesh->channels[ed->index].name);
                     model.overlay = OVERLAY_CONFIRM;
                 }
@@ -685,7 +680,7 @@ static void handle_picker_key(bsp_input_navigation_key_t key) {
             mesh->input_channel = model.picker_index;
             model.overlay       = OVERLAY_NONE;
             settings_save_prefs(&model);
-            toast("sending to #%s", mesh->channels[mesh->input_channel].name);
+            toast("sending to %s", mesh->channels[mesh->input_channel].name);
             break;
         case BSP_INPUT_NAVIGATION_KEY_F2: editor_open(true, -1); break;
         case BSP_INPUT_NAVIGATION_KEY_F3: editor_open(false, model.picker_index); break;
