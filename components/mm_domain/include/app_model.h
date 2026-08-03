@@ -71,9 +71,18 @@ typedef enum {
 
 typedef struct {
     bool     used;
-    uint32_t seq;        // monotonic; scroll and selection anchor on this
-    uint8_t  channel;    // index into the owning mesh's channel list
-    uint32_t timestamp;  // MC: sender's clock. MT: our receive clock.
+    uint32_t seq;      // monotonic; scroll and selection anchor on this
+    uint8_t  channel;  // index into the owning mesh's channel list
+
+    // Always our receive clock, on both networks. It is the only clock we
+    // control, so it is the only one that gives a stable ordering and cannot
+    // put a message in the wrong week because a sender's clock is adrift.
+    uint32_t timestamp;
+
+    // What the sender claimed, where the protocol carries one -- MeshCore does,
+    // Meshtastic does not. Kept rather than discarded: it is the evidence when
+    // a remote clock is wrong, and it is shown in the message detail.
+    uint32_t sender_timestamp;
     // Meshtastic: the node's 4-char short name, or the low 16 bits of the node
     // number in hex until a NodeInfo arrives to name it -- the two are told
     // apart by colour, not by a prefix, because columns are expensive.

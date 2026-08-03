@@ -823,7 +823,7 @@ static void draw_detail(const app_model_t* model) {
     const channel_t* ch = &mesh->channels[msg->channel];
 
     float bw = 50 * CHAR_W;
-    float bh = LINE_H * 12 + 16;
+    float bh = LINE_H * 13 + 16;
     float bx, by;
     overlay_box(bw, bh, &bx, &by, mesh->accent, "Message");
 
@@ -850,7 +850,7 @@ static void draw_detail(const app_model_t* model) {
     char from_val[SENDER_MAX + 24];
     snprintf(from_val, sizeof(from_val), "%s%s", msg->sender, msg->sender_named ? "" : "  (no NodeInfo yet)");
     rows[1] = (typeof(rows[0])){"From", from_val, msg->sender_named ? COL_FROM : COL_FROM_ID};
-    rows[2] = (typeof(rows[0])){model->active == MESH_MT && !msg->outgoing ? "Received" : "Time", when, COL_TEXT};
+    rows[2] = (typeof(rows[0])){"Received", when, COL_TEXT};
 
     char radio_val[48];
     if (msg->outgoing) {
@@ -867,6 +867,25 @@ static void draw_detail(const app_model_t* model) {
     for (int i = 0; i < 4; i++, y += LINE_H) {
         pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, rows[i].label);
         pax_draw_text(&fb, rows[i].color, FONT, FONT_SIZE, vx, y, rows[i].value);
+    }
+
+    // Where the protocol carries the sender's own clock, show it beside ours.
+    // A large disagreement means that node's time is wrong, which is worth
+    // seeing rather than hiding behind our own timestamp.
+    if (msg->sender_timestamp > 0) {
+        char      claimed[40] = "not set";
+        struct tm tm_buf;
+        if (msg->sender_timestamp > 1000000000u) {
+            time_t t = (time_t)msg->sender_timestamp;
+            localtime_r(&t, &tm_buf);
+            strftime(claimed, sizeof(claimed), "%a %d %b %H:%M:%S", &tm_buf);
+        }
+        // Off by more than a few minutes and the remote clock is the problem.
+        int32_t   skew  = (int32_t)msg->sender_timestamp - (int32_t)msg->timestamp;
+        pax_col_t color = (skew > 300 || skew < -300) ? COL_BAD : COL_DIM;
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Sender");
+        pax_draw_text(&fb, color, FONT, FONT_SIZE, vx, y, claimed);
+        y += LINE_H;
     }
 
     // Routing differs by network: MeshCore records the path actually taken,

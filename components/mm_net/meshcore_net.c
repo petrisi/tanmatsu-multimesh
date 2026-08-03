@@ -186,8 +186,11 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
         }
 
         message_t* msg = model_push(mesh, (uint8_t)i, who, true, body, false);
-        msg->timestamp = decoded.timestamp;  // MeshCore carries the sender's clock
-        msg->rssi_dbm  = -(int)pkt->stats.rssi_pkt_raw / 2;
+        // Display and ordering use our own clock; the sender's is kept for the
+        // detail view. A node with an unsynced clock would otherwise scatter
+        // messages across the log and invent day separators.
+        msg->sender_timestamp = decoded.timestamp;
+        msg->rssi_dbm         = -(int)pkt->stats.rssi_pkt_raw / 2;
         msg->snr_db_x4 = pkt->stats.snr_pkt_raw;
         msg->hops      = packet.hop_count;
         msg->path_len  = packet.path_length > sizeof(msg->path) ? (uint8_t)sizeof(msg->path) : packet.path_length;
