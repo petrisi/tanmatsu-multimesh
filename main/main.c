@@ -19,7 +19,7 @@
 #include "bsp/device.h"
 #include "bsp/display.h"
 #include "bsp/input.h"
-#include "demo_traffic.h"
+#include "bsp/rtc.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -28,6 +28,7 @@
 #include "leds.h"
 #include "mesh_net.h"
 #include "nvs_flash.h"
+#include "radio.h"
 #include "settings.h"
 #include "ui.h"
 
@@ -171,85 +172,71 @@ static void composer_send(void) {
         return;
     }
 
-    mesh_state_t* mesh = model_active(&model);
-    message_t*    msg  = model_push(mesh, (uint8_t)mesh->input_channel, model.identity.name, true, model.composer,
-                                    true);
-    msg->tx         = TX_QUEUED;
-    msg->tx_tick_ms = now_ms();
-
+    // Remember it either way: ctrl+up recalls what you have composed, and
+    // losing a long message to a refused send would be worse than the refusal.
     history_push(model.composer);
-    composer_set("");
 
-    mesh->pinned = true;  // jump back to live on send
-    mesh->unseen = 0;
-}
-
-// --- delivery state machine (mock) ---------------------------------------
-//
-// Stands in for what the radio and the repeat/ack watcher will drive. A send
-// spends a moment queued, half a second on air, then waits to hear itself
-// repeated. Every third message hears nothing and settles red.
-//
-// The window has to outlast a multi-hop repeat: at SF8/BW62.5 one transmission
-// is roughly half a second, plus each repeater's backoff. Too short and quiet
-// moments look like failures.
-#define TX_REPEAT_WINDOW_MS 60000
-
-// Returns true when something changed and the screen needs repainting.
-static bool tx_tick(void) {
-    bool changed = false;
-    for (int m = 0; m < MESH_COUNT; m++) {
-        mesh_state_t* mesh = &model.mesh[m];
-        for (int i = 0; i < MAX_MESSAGES; i++) {
-            message_t* msg = &mesh->messages[i];
-            if (!msg->used || !msg->outgoing) continue;
-
-            uint32_t age = now_ms() - msg->tx_tick_ms;
-            switch (msg->tx) {
-                case TX_QUEUED:
-                    if (age > 400) {
-                        msg->tx         = TX_SENDING;
-                        msg->tx_tick_ms = now_ms();
-                        model.radio     = RADIO_TX;
-                        changed         = true;
-                    }
-                    break;
-                case TX_SENDING:
-                    if (age > 600) {
-                        msg->tx         = TX_AWAITING;
-                        msg->tx_tick_ms = now_ms();
-                        model.radio     = RADIO_RX;
-                        changed         = true;
-                    }
-                    break;
-                case TX_AWAITING:
-                    // Repeats trickle in, then the window closes.
-                    if (msg->seq % 3 != 2 && age > 1500 && msg->repeats < 1 + msg->seq % 3) {
-                        msg->repeats++;
-                        msg->tx_tick_ms = now_ms();
-                        changed         = true;
-                    } else if (age > TX_REPEAT_WINDOW_MS) {
-                        msg->tx = msg->repeats ? TX_CONFIRMED : TX_FAILED;
-                        if (msg->tx == TX_FAILED) toast("no repeat heard");
-                        changed = true;
-                    }
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
-    return changed;
+    // The encode-and-transmit path is not built yet. Refuse plainly rather than
+    // echoing the message locally and letting a delivery indicator imply it
+    // went out.
+    toast("transmit not implemented yet");
 }
 
 // --- navigation ----------------------------------------------------------
 
+// Retune the radio to whichever network is now active. Anything already queued
+// was received under the previous modem settings and belongs to the network we
+// just left, so it is dropped rather than decoded against the wrong stack.
+static void apply_active_net(void) {
+    if (!radio_is_ready()) return;
+
+    lora_protocol_config_params_t config;
+    nets[model.active]->get_config(&config);
+
+    radio_drain();
+    if (radio_apply_config(&config)) {
+        model.radio = RADIO_RX;
+    } else {
+        model.radio = RADIO_ERROR;
+        toast("radio config failed");
+    }
+}
+
 static void switch_mesh(void) {
     model.active = (model.active + 1) % MESH_COUNT;
     mesh_state_t* mesh = model_active(&model);
+    apply_active_net();
     leds_set_mesh(mesh->accent);
     settings_save_prefs(&model);
     toast("%s", mesh->name);
+}
+
+// Drain whatever the radio has queued and hand each frame to the active
+// network's decoder. Bounded per call so a burst cannot starve the UI.
+#define RX_PER_ITERATION 8
+
+static bool radio_poll(void) {
+    bool changed = false;
+
+    for (int i = 0; i < RX_PER_ITERATION; i++) {
+        lora_protocol_lora_packet_t packet;
+        if (!radio_receive(&packet, 0)) break;
+
+        mesh_state_t* mesh = model_active(&model);
+        if (nets[model.active]->handle(&packet, mesh)) {
+            // Blink the LED in the colour of the channel it arrived on.
+            const message_t* newest = model_message_at(mesh, mesh->count - 1);
+            if (newest && newest->channel < mesh->channel_count) {
+                leds_notify_message(mesh->channels[newest->channel].color);
+            }
+        } else {
+            // Heard something, but not a message for us: position, telemetry,
+            // an advert, or a channel we hold no key for.
+            leds_notify_activity();
+        }
+        changed = true;
+    }
+    return changed;
 }
 
 static void next_channel(int delta) {
@@ -732,15 +719,26 @@ void app_main(void) {
     leds_init();
     leds_set_mesh(model_active(&model)->accent);
 
-#if MM_DEMO_TRAFFIC
-    demo_traffic_seed(&model);
-#endif
+    ui_boot_line("Starting radio...");
+    if (radio_start()) {
+        // The P4 has no RTC; the clock lives on the C6 and the link has to be up
+        // before it can be read. Without this every timestamp renders as 1970.
+        model.time_synced = (bsp_rtc_update_time() == ESP_OK);
+        if (!model.time_synced) ESP_LOGW(TAG, "clock not available from the coprocessor");
+        apply_active_net();
+    } else {
+        // Still usable: channels and identity can be configured with no radio.
+        model.radio = RADIO_ERROR;
+        ESP_LOGE(TAG, "radio unavailable");
+    }
 
     // Nothing can be sent without a name, so ask for one immediately rather than
     // letting the user discover it when their first message is refused.
     if (!identity_is_set(&model.identity)) {
         open_identity();
         toast("welcome - set a name to start");
+    } else if (model.radio == RADIO_ERROR) {
+        toast("radio unavailable");
     }
 
     ui_render(&model);
@@ -788,15 +786,7 @@ void app_main(void) {
             }
         }
 
-        if (tx_tick()) dirty = true;
-
-#if MM_DEMO_TRAFFIC
-        demo_event_t demo;
-        if (demo_traffic_tick(&model, &demo)) dirty = true;
-        if (demo.message) leds_notify_message(demo.message_color);
-        if (demo.activity) leds_notify_activity();
-#endif
-
+        if (radio_poll()) dirty = true;
         leds_tick();
 
         if (model.toast[0] && (int32_t)(now_ms() - model.toast_until_ms) >= 0) {
