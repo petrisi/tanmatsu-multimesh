@@ -4,15 +4,16 @@ list(APPEND extra_requires esp-hosted-tanmatsu)
 endif()
 
 idf_component_register(
+	# UI prototype build. The verified receive stacks stay in the tree but are
+	# out of this build: their adapters (meshcore_net.c / meshtastic_net.c)
+	# talk to the old UI API, and bending the new UI to keep them compiling
+	# would be backwards. They come back when the protocol layer is rewired to
+	# a UI-independent sink.
 	SRCS
 		"main.c"
-		"radio_cfg.c"
-		"meshcore_wire.c"
-		"meshcore_crypto.c"
-		"meshcore_net.c"
-		"meshtastic_wire.c"
-		"meshtastic_crypto.c"
-		"meshtastic_net.c"
+		"font_mono_fi.c"
+		"leds.c"
+		"mock_data.c"
 		"ui.c"
 	PRIV_REQUIRES
 		esp_lcd

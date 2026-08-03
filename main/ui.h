@@ -1,40 +1,35 @@
 // SPDX-License-Identifier: MIT
 //
-// Screen output. The PoC deliberately renders everything on-device rather than
-// relying on printf: the USB port is either in debug mode or BadgeLink mode,
-// never both, so a serial monitor is not available while deploying.
+// All drawing for the UI prototype. Pure presentation: it reads the model and
+// never mutates it.
 
 #pragma once
 
 #include <stdbool.h>
-#include <stdint.h>
+#include "app_model.h"
 
-// Counters are per-network; `detail` is a short free-form breakdown each stack
-// fills in with whatever is diagnostic for it (payload types, portnums, ...).
-typedef struct {
-    uint32_t packets_total;    // frames handed up by the radio
-    uint32_t packets_bad;      // failed to parse as this network's framing
-    uint32_t not_our_channel;  // parsed, but wrong channel hash or failed MAC
-    uint32_t messages;         // decoded, displayable messages
-    char     detail[72];
-} ui_stats_t;
-
-// Bring up the framebuffer against whatever geometry the BSP reports.
-// Returns false if this board has no display.
+// Bring up the framebuffer. False if this board has no display.
 bool ui_init(void);
 
-// Full-screen status line, used during boot before the message list exists.
+// Full-screen status line, used before the main UI exists.
 void ui_boot_line(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
-// Header text shown above the message list (active network + radio settings).
-void ui_set_header(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+// Repaint everything.
+void ui_render(const app_model_t* model);
 
-// Append a message to the shared scrollback. `tag` identifies the network so
-// both stacks' traffic can share one list.
-void ui_add_message(const char* tag, uint32_t timestamp, const char* text, int rssi_dbm, int snr_db_x4, uint8_t hops);
+// Rows of message list currently visible; the event loop needs it to clamp
+// scrolling.
+int ui_visible_rows(void);
 
-// Append a local notice (network switched, radio error) to the same list.
-void ui_add_notice(const char* text);
+// Total wrapped display lines for the active mesh. Scrolling counts display
+// lines, not messages, because one message can occupy several.
+int ui_line_count(const app_model_t* model);
 
-// Repaint the message list plus the traffic counters.
-void ui_render(const ui_stats_t* stats);
+// Scrolling is expressed as a line index into the wrapped view; the model
+// stores it as a message anchor so arriving traffic cannot drag the viewport.
+int  ui_anchor_index(const app_model_t* model);
+void ui_set_anchor(app_model_t* model, int line_index);
+
+// Line index of a message's first row, or -1 if it is not in the ring. Used to
+// keep the selection on screen.
+int ui_line_of_seq(const app_model_t* model, uint32_t seq);
