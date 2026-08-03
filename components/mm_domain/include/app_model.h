@@ -166,11 +166,20 @@ typedef enum {
 } identity_field_t;
 
 typedef struct {
-    char name[ID_NAME_MAX + 1];    // MeshCore sender name / Meshtastic long name
-    char short_name[ID_SHORT_MAX + 1];
-    char node_id[12];              // derived from the MAC, never edited
-    int  field;
+    char     name[ID_NAME_MAX + 1];  // MeshCore sender name / Meshtastic long name
+    char     short_name[ID_SHORT_MAX + 1];
+    char     node_id[12];  // "!aabbccdd", derived from the MAC, never edited
+    uint32_t node_num;     // the same value the wire carries
+    int      field;
 } identity_t;
+
+// Transmitting without an identity would put an anonymous message on a public
+// network: MeshCore carries the sender name inside the message text and has no
+// other identity field, so an empty name is not merely unfriendly, it is
+// unattributable. TX is refused until this is true.
+static inline bool identity_is_set(const identity_t* identity) {
+    return identity->name[0] != '\0';
+}
 
 typedef enum {
     RADIO_RX = 0,
@@ -217,11 +226,19 @@ static inline int model_byte_limit(const app_model_t* model) {
     return model->active == MESH_MT ? LIMIT_MT_BYTES : LIMIT_MC_BYTES;
 }
 
-// Populate with plausible traffic so the layout can be judged.
-void mock_data_init(app_model_t* model);
+// Zero the model and set the per-network constants. Channels and identity come
+// from settings_load(), or from settings_apply_default_channels() on first run.
+void model_init(app_model_t* model);
 
+// Append to a network's ring. Increments `unseen` when a received message
+// arrives while the user is scrolled away, so the viewport can stay put.
 message_t* model_push(mesh_state_t* mesh, uint8_t channel, const char* sender, bool sender_named, const char* text,
                       bool outgoing);
+
+// Ring access by position (0 = oldest held) or by sequence number. Both return
+// NULL rather than a stale slot when the message has aged out.
+const message_t* model_message_at(const mesh_state_t* mesh, int logical);
+const message_t* model_message_by_seq(const mesh_state_t* mesh, int32_t seq);
 
 static inline mesh_state_t* model_active(app_model_t* model) {
     return &model->mesh[model->active];

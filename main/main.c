@@ -19,19 +19,28 @@
 #include "bsp/device.h"
 #include "bsp/display.h"
 #include "bsp/input.h"
+#include "demo_traffic.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "leds.h"
+#include "mesh_net.h"
 #include "nvs_flash.h"
+#include "settings.h"
 #include "ui.h"
 
 static const char TAG[] = "main";
 
 static app_model_t   model;
 static QueueHandle_t input_event_queue = NULL;
+
+// The networks, in the order the switch key cycles them.
+static const mesh_net_t* const nets[MESH_COUNT] = {
+    [MESH_MC] = &mesh_net_meshcore,
+    [MESH_MT] = &mesh_net_meshtastic,
+};
 
 #define TOAST_MS 1800
 
@@ -129,8 +138,34 @@ static void history_browse(int dir) {
     composer_set(model.history[model.history_pos]);
 }
 
+// Recompute a channel's binary key and hash after its secret or name changed.
+// Which is protocol knowledge, so the owning network does it.
+static void prepare_channels(mesh_id_t id) {
+    mesh_state_t* mesh = &model.mesh[id];
+    for (int i = 0; i < mesh->channel_count; i++) {
+        nets[id]->prepare_channel(&mesh->channels[i]);
+        if (!mesh->channels[i].ready) {
+            ESP_LOGW(TAG, "%s channel '%s' has an unusable key", nets[id]->name, mesh->channels[i].name);
+        }
+    }
+}
+
+static void open_identity(void) {
+    model.identity.field = ID_FIELD_NAME;
+    model.overlay        = OVERLAY_IDENTITY;
+}
+
 static void composer_send(void) {
     if (model.composer_len == 0) return;
+
+    // Refuse to transmit anonymously. MeshCore carries the sender name inside
+    // the message text and has no other identity field, so an empty name is not
+    // merely unfriendly -- the message is unattributable on the network.
+    if (!identity_is_set(&model.identity)) {
+        toast("set a name before sending");
+        open_identity();
+        return;
+    }
     if (model.composer_len > model_byte_limit(&model)) {
         toast("too long for this network");
         return;
@@ -207,76 +242,21 @@ static bool tx_tick(void) {
     return changed;
 }
 
-// --- mock incoming traffic ----------------------------------------------
-//
-// Stands in for the radio so the behaviours that only appear with live traffic
-// can be judged: the viewport holding still while scrolled away, the unseen
-// counter, and the message LED blinking until someone looks.
-
-#define INCOMING_EVERY_MS 12000
-#define ACTIVITY_EVERY_MS 4500
-
-static uint32_t next_incoming_ms;
-static uint32_t next_activity_ms;
-static int      incoming_index;
-
-static const struct {
-    const char* sender;
-    bool        named;
-    const char* text;
-} incoming[] = {
-    {"OH6ABC", true, "kuuluuko siellä vielä?"},
-    {"elk1", true, "sää selkenee illalla"},
-    {"c3d4", false, "uusi solmu näkyvissä"},
-    {"Vuores", true, "lähdössä ulos, testataan matkalla kuuluvuutta pidemmällä viestillä"},
-    {"owl7", true, "kuittaan"},
-};
-
-static bool incoming_tick(void) {
-    uint32_t t = now_ms();
-    bool     changed = false;
-
-    if (t >= next_activity_ms) {
-        next_activity_ms = t + ACTIVITY_EVERY_MS;
-        leds_notify_activity();  // position/telemetry/foreign channel: LED only
-    }
-
-    if (t < next_incoming_ms) return false;
-    next_incoming_ms = t + INCOMING_EVERY_MS;
-
-    mesh_state_t* mesh = model_active(&model);
-    int           i    = incoming_index++ % (int)(sizeof(incoming) / sizeof(incoming[0]));
-    uint8_t       ch   = (uint8_t)(incoming_index % mesh->channel_count);
-
-    message_t* msg = model_push(mesh, ch, incoming[i].sender, incoming[i].named, incoming[i].text, false);
-    msg->rssi_dbm  = -70 - (incoming_index * 7) % 30;
-    msg->snr_db_x4 = 12 + (incoming_index * 5) % 32;
-    msg->hops      = (uint8_t)(incoming_index % 3);
-    msg->path_len  = msg->hops;
-    for (int p = 0; p < msg->path_len; p++) msg->path[p] = (uint8_t)(0x3b + p * 0x29);
-    msg->hop_start = 3;
-    msg->hop_limit = (uint8_t)(3 - msg->hops);
-    if (msg->hops) snprintf(msg->relayed_by, sizeof(msg->relayed_by), "owl7");
-
-    // Scrolled away: the view must not move, but the arrival is counted.
-    if (!mesh->pinned) mesh->unseen++;
-    leds_notify_message(mesh->channels[ch].color);
-    changed = true;
-    return changed;
-}
-
 // --- navigation ----------------------------------------------------------
 
 static void switch_mesh(void) {
     model.active = (model.active + 1) % MESH_COUNT;
     mesh_state_t* mesh = model_active(&model);
     leds_set_mesh(mesh->accent);
+    settings_save_prefs(&model);
     toast("%s", mesh->name);
 }
 
 static void next_channel(int delta) {
-    mesh_state_t* mesh  = model_active(&model);
+    mesh_state_t* mesh = model_active(&model);
+    if (mesh->channel_count == 0) return;
     mesh->input_channel = (mesh->input_channel + delta + mesh->channel_count) % mesh->channel_count;
+    settings_save_prefs(&model);
     toast("sending to #%s", mesh->channels[mesh->input_channel].name);
 }
 
@@ -292,15 +272,10 @@ static void jump_to_latest(void) {
 
 // --- selection -----------------------------------------------------------
 
-static const message_t* mesh_msg_at(const mesh_state_t* mesh, int logical) {
-    int idx = (mesh->head - mesh->count + logical + MAX_MESSAGES * 2) % MAX_MESSAGES;
-    return &mesh->messages[idx];
-}
-
 static int selected_logical(const mesh_state_t* mesh) {
     for (int i = 0; i < mesh->count; i++) {
-        const message_t* m = mesh_msg_at(mesh, i);
-        if (m->used && (int32_t)m->seq == mesh->selected_seq) return i;
+        const message_t* m = model_message_at(mesh, i);
+        if (m && m->used && (int32_t)m->seq == mesh->selected_seq) return i;
     }
     return -1;
 }
@@ -311,7 +286,7 @@ static void selection_move(int dir) {
 
     if (mesh->selected_seq < 0) {
         if (dir > 0) return;  // alt+down with nothing selected does nothing
-        mesh->selected_seq = (int32_t)mesh_msg_at(mesh, mesh->count - 1)->seq;
+        mesh->selected_seq = (int32_t)model_message_at(mesh,mesh->count - 1)->seq;
         return;
     }
 
@@ -327,7 +302,7 @@ static void selection_move(int dir) {
         mesh->selected_seq = -1;       // alt+down past the newest leaves the mode
         return;
     }
-    mesh->selected_seq = (int32_t)mesh_msg_at(mesh, next)->seq;
+    mesh->selected_seq = (int32_t)model_message_at(mesh,next)->seq;
 
     // Scroll only as far as needed to bring the selection back into view.
     int line = ui_line_of_seq(&model, (uint32_t)mesh->selected_seq);
@@ -403,8 +378,18 @@ static void editor_save(void) {
     snprintf(ch->secret, sizeof(ch->secret), "%s", ed->secret);
     ch->color = ch_palette[ed->color];
 
+    // The key and hash are derived, so they must be recomputed here: on
+    // Meshtastic the hash mixes the channel name, meaning a rename alone changes
+    // which traffic this channel matches.
+    nets[model.active]->prepare_channel(ch);
+    settings_save_channels(&model, model.active);
+
     model.overlay = OVERLAY_PICKER;
-    toast("saved #%s", ch->name);
+    if (!ch->ready) {
+        toast("saved, but the key is unusable");
+    } else {
+        toast("saved #%s", ch->name);
+    }
 }
 
 static void editor_delete_confirmed(void) {
@@ -434,6 +419,8 @@ static void editor_delete_confirmed(void) {
     if (mesh->input_channel >= mesh->channel_count) mesh->input_channel = mesh->channel_count - 1;
     model.picker_index = 0;
     model.overlay      = OVERLAY_PICKER;
+    settings_save_channels(&model, model.active);
+    settings_save_prefs(&model);
     toast("deleted #%s", gone);
 }
 
@@ -529,11 +516,28 @@ static void handle_identity_key(bsp_input_navigation_key_t key) {
         case BSP_INPUT_NAVIGATION_KEY_SPACE_M:
         case BSP_INPUT_NAVIGATION_KEY_SPACE_R: field_append(identity_focused_field(&max), max, " "); break;
         case BSP_INPUT_NAVIGATION_KEY_RETURN:
+            if (!identity_is_set(&model.identity)) {
+                toast("a name is required");
+                break;
+            }
+            // A blank short name is filled from the long one rather than
+            // rejected: Meshtastic needs four characters and the user should not
+            // have to invent them twice.
+            if (model.identity.short_name[0] == '\0') {
+                snprintf(model.identity.short_name, sizeof(model.identity.short_name), "%.*s", ID_SHORT_MAX,
+                         model.identity.name);
+            }
+            settings_save_identity(&model);
             model.overlay = OVERLAY_NONE;
             toast("identity saved");
             break;
         case BSP_INPUT_NAVIGATION_KEY_ESC:
-        case BSP_INPUT_NAVIGATION_KEY_F1: model.overlay = OVERLAY_NONE; break;
+        case BSP_INPUT_NAVIGATION_KEY_F1:
+            // Escaping an unset identity would leave the app unable to send with
+            // no obvious reason why, so reload whatever was stored and let the
+            // user discover it again from the composer.
+            model.overlay = OVERLAY_NONE;
+            break;
         default: break;
     }
 }
@@ -551,6 +555,7 @@ static void handle_picker_key(bsp_input_navigation_key_t key) {
         case BSP_INPUT_NAVIGATION_KEY_RETURN:
             mesh->input_channel = model.picker_index;
             model.overlay       = OVERLAY_NONE;
+            settings_save_prefs(&model);
             toast("sending to #%s", mesh->channels[mesh->input_channel].name);
             break;
         case BSP_INPUT_NAVIGATION_KEY_F2: editor_open(true, -1); break;
@@ -621,12 +626,12 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
             break;
 
         case BSP_INPUT_NAVIGATION_KEY_F2: switch_mesh(); break;
-        case BSP_INPUT_NAVIGATION_KEY_F3: model.show_meta = !model.show_meta; break;
-        case BSP_INPUT_NAVIGATION_KEY_F4: toast("emoji picker: not in this build"); break;
-        case BSP_INPUT_NAVIGATION_KEY_F5:
-            model.identity.field = ID_FIELD_NAME;
-            model.overlay        = OVERLAY_IDENTITY;
+        case BSP_INPUT_NAVIGATION_KEY_F3:
+            model.show_meta = !model.show_meta;
+            settings_save_prefs(&model);
             break;
+        case BSP_INPUT_NAVIGATION_KEY_F4: toast("emoji picker: not in this build"); break;
+        case BSP_INPUT_NAVIGATION_KEY_F5: open_identity(); break;
         case BSP_INPUT_NAVIGATION_KEY_F6:
             model.overlay      = OVERLAY_PICKER;
             model.picker_index = mesh->input_channel;
@@ -708,12 +713,35 @@ void app_main(void) {
     struct timeval tv = {.tv_sec = 1785000000, .tv_usec = 0};
     settimeofday(&tv, NULL);
 
-    mock_data_init(&model);
+    model_init(&model);
+    settings_derive_node_id(&model.identity);
+
+    settings_init();
+    settings_load(&model);
+    // Defaults fill only what storage did not: the well-known public channel on
+    // MeshCore and EdgeFastLow on Meshtastic, so a fresh device is on the air
+    // without configuring anything. A user who deletes them keeps them deleted,
+    // because their own channels will already have been stored.
+    settings_apply_default_channels(&model);
+
+    for (int i = 0; i < MESH_COUNT; i++) {
+        if (!nets[i]->init()) ESP_LOGE(TAG, "%s stack init failed", nets[i]->name);
+        prepare_channels((mesh_id_t)i);
+    }
+
     leds_init();
     leds_set_mesh(model_active(&model)->accent);
 
-    next_incoming_ms = now_ms() + INCOMING_EVERY_MS;
-    next_activity_ms = now_ms() + ACTIVITY_EVERY_MS;
+#if MM_DEMO_TRAFFIC
+    demo_traffic_seed(&model);
+#endif
+
+    // Nothing can be sent without a name, so ask for one immediately rather than
+    // letting the user discover it when their first message is refused.
+    if (!identity_is_set(&model.identity)) {
+        open_identity();
+        toast("welcome - set a name to start");
+    }
 
     ui_render(&model);
 
@@ -761,7 +789,14 @@ void app_main(void) {
         }
 
         if (tx_tick()) dirty = true;
-        if (incoming_tick()) dirty = true;
+
+#if MM_DEMO_TRAFFIC
+        demo_event_t demo;
+        if (demo_traffic_tick(&model, &demo)) dirty = true;
+        if (demo.message) leds_notify_message(demo.message_color);
+        if (demo.activity) leds_notify_activity();
+#endif
+
         leds_tick();
 
         if (model.toast[0] && (int32_t)(now_ms() - model.toast_until_ms) >= 0) {

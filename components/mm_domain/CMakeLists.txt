@@ -2,8 +2,8 @@
 # renders and the network stacks write into. Deliberately knows nothing about
 # either protocol or about drawing.
 idf_component_register(
-    SRCS "mock_data.c"
+    SRCS "model.c" "settings.c" "demo_traffic.c"
     INCLUDE_DIRS "include"
     REQUIRES pax-gfx
-    PRIV_REQUIRES nvs_flash
+    PRIV_REQUIRES nvs_flash esp_hw_support
 )

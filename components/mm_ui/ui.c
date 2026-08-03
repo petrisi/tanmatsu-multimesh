@@ -244,10 +244,7 @@ static int utf8_adv(unsigned char c) {
     return (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
 }
 
-static const message_t* msg_at(const mesh_state_t* mesh, int logical) {
-    int idx = (mesh->head - mesh->count + logical + MAX_MESSAGES * 2) % MAX_MESSAGES;
-    return &mesh->messages[idx];
-}
+#define msg_at(mesh, logical) model_message_at((mesh), (logical))
 
 static void wrap_message(int msg_index, const char* text, int room) {
     int pos   = 0;
