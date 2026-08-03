@@ -10,8 +10,8 @@
 
 param(
     [switch]$Start,
-    [string]$Slug    = "fi.simolin.meshpoc",
-    [string]$Title   = "MeshComms PoC",
+    [string]$Slug    = "fi.ps.multimesh",
+    [string]$Title   = "MultiMesh",
     [int]   $Version = 0
 )
 

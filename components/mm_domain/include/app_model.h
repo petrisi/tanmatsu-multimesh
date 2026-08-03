@@ -43,6 +43,14 @@ typedef struct {
     char      display[CH_DISPLAY_MAX + 1];  // what fits a column: "EFL"
     char      secret[CH_SECRET_MAX + 1];    // MC: key hex. MT: PSK base64.
     pax_col_t color;
+
+    // Derived from `secret` by the owning network stack, never edited directly:
+    // the two networks expand and hash their keys differently, and that is
+    // protocol knowledge the domain has no business holding.
+    uint8_t key[32];
+    uint8_t key_len;
+    uint8_t hash;   // channel hash byte carried in the clear on the wire
+    bool    ready;  // false when the secret failed to parse
 } channel_t;
 
 // Outgoing messages occupy the timestamp column with their progress, and only
@@ -89,9 +97,20 @@ typedef struct {
     uint32_t   tx_tick_ms;  // when the current tx state was entered
 } message_t;
 
+// Receive counters, kept per network. `detail` is a short free-form breakdown
+// each stack fills with whatever is diagnostic for it (payload types, portnums).
+typedef struct {
+    uint32_t packets_total;    // frames handed up by the radio
+    uint32_t packets_bad;      // failed to parse as this network's framing
+    uint32_t not_our_channel;  // parsed, but wrong channel or failed the MAC
+    uint32_t messages;         // decoded, displayable messages
+    char     detail[72];
+} rx_stats_t;
+
 typedef struct {
     const char* name;
     pax_col_t   accent;  // status bar background for this mesh
+    rx_stats_t  stats;
 
     channel_t channels[MAX_CHANNELS];
     int       channel_count;
