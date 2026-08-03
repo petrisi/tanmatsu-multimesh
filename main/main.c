@@ -295,7 +295,10 @@ static void composer_send(void) {
     // The local echo goes in first so the message has a sequence number for the
     // encoder to attach repeats to, and so the user sees it immediately rather
     // than after the radio has finished.
-    message_t* msg = model_push(mesh, (uint8_t)mesh->input_channel, model.identity.name, true, model.composer, true);
+    // Attribute the echo the way this network will: MeshCore shows the full
+    // name it embeds in the text, Meshtastic the short name other nodes use.
+    const char* sender = nets[model.active]->local_sender(&model.identity);
+    message_t*  msg    = model_push(mesh, (uint8_t)mesh->input_channel, sender, true, model.composer, true);
     msg->tx        = TX_QUEUED;
     msg->tx_tick_ms = now_ms();
 

@@ -20,7 +20,9 @@ static const char TAG[] = "settings";
 // Bump when a stored layout changes meaning. Records with an unknown version are
 // discarded rather than reinterpreted: losing settings is recoverable, silently
 // misreading a channel key is not.
-#define STORED_VERSION 1
+// v2 widened the channel abbreviation from 4 to 10 characters, which changed the
+// stored record layout.
+#define STORED_VERSION 2
 
 typedef struct __attribute__((packed)) {
     char     name[CH_NAME_MAX + 1];

@@ -202,9 +202,23 @@ static float hint_text(float x, float y, const char* label) {
 // --- columns -------------------------------------------------------------
 
 #define COL_TIME_CELLS 5
-#define COL_CHAN_CELLS 4
 #define COL_FROM_CELLS 4
 #define COL_META_CELLS 11
+
+// The channel column is sized to the longest abbreviation actually configured
+// rather than to CH_DISPLAY_MAX, so short names do not cost the message text any
+// width. Clamped below so the column never collapses.
+#define COL_CHAN_MIN 4
+
+static int chan_cells(const app_model_t* model) {
+    const mesh_state_t* mesh  = &model->mesh[model->active];
+    int                 width = COL_CHAN_MIN;
+    for (int i = 0; i < mesh->channel_count; i++) {
+        int len = (int)strlen(mesh->channels[i].display);
+        if (len > width) width = len;
+    }
+    return width > CH_DISPLAY_MAX ? CH_DISPLAY_MAX : width;
+}
 
 static float x_time(void) {
     return 6;
@@ -212,16 +226,16 @@ static float x_time(void) {
 static float x_chan(void) {
     return x_time() + (COL_TIME_CELLS + 1) * CHAR_W;
 }
-static float x_from(void) {
-    return x_chan() + (COL_CHAN_CELLS + 1) * CHAR_W;
+static float x_from(const app_model_t* model) {
+    return x_chan() + (chan_cells(model) + 1) * CHAR_W;
 }
-static float x_text(void) {
-    return x_from() + (COL_FROM_CELLS + 1) * CHAR_W;
+static float x_text(const app_model_t* model) {
+    return x_from(model) + (COL_FROM_CELLS + 1) * CHAR_W;
 }
 
 static int text_room(const app_model_t* model) {
     float right = model->show_meta ? ui_w - 10 - (COL_META_CELLS + 1) * CHAR_W : ui_w - 10;
-    int   room  = (int)((right - x_text()) / CHAR_W);
+    int   room  = (int)((right - x_text(model)) / CHAR_W);
     return room > 4 ? room : 4;
 }
 
@@ -411,7 +425,7 @@ static void draw_status(const app_model_t* model) {
     // The channel sits on its own dark chip: the channel colour would not be
     // reliably legible directly against the mesh accent.
     char label[sizeof(ch->name) + 2];
-    snprintf(label, sizeof(label), "#%s", ch->name);
+    snprintf(label, sizeof(label), "%s%s", ch->name[0] == '#' ? "" : "#", ch->name);
     float chip_w = (float)strlen(label) * CHAR_W + 12;
     float chip_x = 8 + 11 * CHAR_W;
     pax_draw_round_rect(&fb, COL_CHIP, chip_x, 3, chip_w, STATUS_H - 6, 4);
@@ -535,15 +549,15 @@ static void draw_messages(const app_model_t* model) {
         if (line->first) {
             draw_time_cell(model, msg, y);
 
-            char chan[COL_CHAN_CELLS + 1];
-            snprintf(chan, sizeof(chan), "%.*s", COL_CHAN_CELLS, ch->display);
+            char chan[CH_DISPLAY_MAX + 1];
+            snprintf(chan, sizeof(chan), "%.*s", chan_cells(model), ch->display);
             pax_draw_text(&fb, ch->color, FONT, FONT_SIZE, x_chan(), y, chan);
 
             char who[COL_FROM_CELLS + 1];
             snprintf(who, sizeof(who), "%.*s", COL_FROM_CELLS, msg->sender);
             // Colour alone distinguishes a NodeInfo short name from a raw node
             // id -- no prefix, so the column is the same width either way.
-            pax_draw_text(&fb, msg->sender_named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, x_from(), y, who);
+            pax_draw_text(&fb, msg->sender_named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, x_from(model), y, who);
 
             if (model->show_meta) {
                 char meta[16];
@@ -556,7 +570,7 @@ static void draw_messages(const app_model_t* model) {
         int  len = line->len < (int)sizeof(body) - 1 ? line->len : (int)sizeof(body) - 1;
         memcpy(body, &msg->text[line->start], len);
         body[len] = '\0';
-        pax_draw_text(&fb, msg->outgoing ? COL_SENT : COL_TEXT, FONT, FONT_SIZE, x_text(), y, body);
+        pax_draw_text(&fb, msg->outgoing ? COL_SENT : COL_TEXT, FONT, FONT_SIZE, x_text(model), y, body);
     }
 
     // Slim scrollbar rather than a text indicator: it costs no columns and
@@ -678,7 +692,7 @@ static void draw_picker(const app_model_t* model) {
         pax_draw_rect(&fb, ch->color, bx + 14, y + 4, 10, 10);
 
         char label[CH_NAME_MAX + 2];
-        snprintf(label, sizeof(label), "#%s", ch->name);
+        snprintf(label, sizeof(label), "%s%s", ch->name[0] == '#' ? "" : "#", ch->name);
         pax_draw_text(&fb, ch->color, FONT, FONT_SIZE, bx + 32, y, label);
 
         char shown[16];
@@ -815,7 +829,7 @@ static void draw_detail(const app_model_t* model) {
         const char* value;
         pax_col_t   color;
     } rows[4];
-    char chan_val[CH_NAME_MAX + 8];
+    char chan_val[CH_NAME_MAX + CH_DISPLAY_MAX + 8];
     snprintf(chan_val, sizeof(chan_val), "%s (%s)", ch->name, ch->display);
     rows[0] = (typeof(rows[0])){"Channel", chan_val, ch->color};
 

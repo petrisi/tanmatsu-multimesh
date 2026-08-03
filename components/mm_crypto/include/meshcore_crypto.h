@@ -22,7 +22,18 @@ bool mc_crypto_init(void);
 
 // Channel hash = SHA256(key)[0]. Cheap pre-filter: incoming GRP_TXT frames
 // carry it in the clear, so a mismatch lets us skip the HMAC entirely.
-uint8_t mc_channel_hash(const uint8_t key[MC_CIPHER_KEY_SIZE]);
+//
+// `key_len` is 16 or 32: MeshCore hashes whichever length the key actually is,
+// so passing the wrong one produces a hash that matches nothing.
+uint8_t mc_channel_hash(const uint8_t* key, size_t key_len);
+
+// Hashtag channels are public-by-name: anyone who knows the name can derive the
+// key, which is the point -- they are topic-based rooms rather than secrets.
+// The key is the first 16 bytes of SHA256 over the name *including* the '#'.
+//
+//   #test -> 9cd8fcf22a47333b591d96a2b848b73f
+//   #mesh -> 5b664cde0b08b220612113db980650f3
+bool mc_derive_hashtag_key(const char* name, uint8_t out[MC_CIPHER_KEY_SIZE]);
 
 typedef struct {
     uint32_t timestamp;  // Unix seconds, as stamped by the sender
@@ -33,13 +44,15 @@ typedef struct {
 // Verify HMAC-SHA256(key)[0:2] over the ciphertext, then AES-128-ECB decrypt and
 // split the plaintext into timestamp[4] | text_type[1] | text[...].
 // Returns false without writing plaintext when the MAC does not match.
-bool mc_grp_decrypt(const mc_grp_txt_t* grp, const uint8_t key[MC_CIPHER_KEY_SIZE], mc_grp_msg_t* out);
+// `key_len` is 16 or 32. MeshCore accepts both, so the cipher width follows the
+// key rather than being assumed.
+bool mc_grp_decrypt(const mc_grp_txt_t* grp, const uint8_t* key, size_t key_len, mc_grp_msg_t* out);
 
 // The inverse. `plain` must already be padded to a 16-byte multiple; ECB has no
 // notion of a partial block. Writes `padded_len` bytes of ciphertext and the
 // full 32-byte HMAC, of which the wire keeps the first MC_CIPHER_MAC_SIZE.
-bool mc_grp_encrypt(const uint8_t key[MC_CIPHER_KEY_SIZE], const uint8_t* plain, size_t padded_len,
-                    uint8_t* out_cipher, uint8_t out_mac[32]);
+bool mc_grp_encrypt(const uint8_t* key, size_t key_len, const uint8_t* plain, size_t padded_len, uint8_t* out_cipher,
+                    uint8_t out_mac[32]);
 
 // Frame a channel message into the padded plaintext the wire expects:
 //   timestamp[4] | text_type[1] | text[...]  zero-padded to a 16-byte multiple.

@@ -16,15 +16,25 @@
 
 typedef struct {
     uint8_t bytes[MT_MAX_KEY_SIZE];
-    size_t  length;  // 16 or 32
+    size_t  length;  // 0 (unencrypted), 16 (AES-128) or 32 (AES-256)
 } mt_key_t;
 
-// Expand a configured PSK the way Meshtastic does.
+// Expand a configured PSK the way Meshtastic does. Every size means something
+// different, and getting this wrong silently produces a channel nobody else can
+// read:
 //
-// A single byte is an index into the "simple" key family rather than a key:
-// index 1 is the well-known default PSK, and index n bumps its last byte by
-// n-1. Index 0 disables encryption. Longer keys are zero-padded up to 16 or 32
-// bytes. "AQ==" therefore decodes to {0x01}, which means the default key.
+//   0 bytes    no encryption. A legitimate configuration, not an error: the
+//              channel is plaintext and anyone on the frequency can read it.
+//   1 byte     an index into the "simple" key family, not a key. Index 0 also
+//              means no encryption; index 1 is the well-known default PSK;
+//              index n bumps its last byte by n-1. "AQ==" decodes to {0x01},
+//              which is why the default channel's PSK looks so short.
+//   2-15       a short AES-128 key, zero-padded to 16.
+//   16         AES-128.
+//   17-31      a short AES-256 key, zero-padded to 32.
+//   32         AES-256.
+//
+// Returns false only for a length above 32, which cannot be any of these.
 bool mt_key_expand(const uint8_t* psk, size_t psk_len, mt_key_t* out);
 
 // Channel hash = xor of the channel name bytes, xored with the xor of the

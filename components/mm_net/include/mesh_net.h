@@ -34,6 +34,11 @@ typedef struct mesh_net_s {
     // differently -- MeshCore hashes the key, Meshtastic xors name and key.
     void (*prepare_channel)(channel_t* channel);
 
+    // How our own messages should be attributed in the local echo. The networks
+    // disagree: MeshCore carries the full name inside the message text, while
+    // Meshtastic identifies nodes by their four-character short name.
+    const char* (*local_sender)(const identity_t* identity);
+
     // Decode one frame into `mesh`, updating its counters. Returns true when a
     // displayable message was added, so the caller can notify.
     //

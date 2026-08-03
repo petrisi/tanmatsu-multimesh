@@ -20,7 +20,11 @@
 #define TEXT_MAX      192
 #define HISTORY_MAX   12
 
-#define CH_DISPLAY_MAX 4  // characters, not counting the terminator
+// The column abbreviation. Longer than it looks it needs to be: MeshCore
+// hashtag channels read badly cut to four characters, and the message list sizes
+// its channel column to the longest one actually configured rather than always
+// reserving the maximum.
+#define CH_DISPLAY_MAX 10
 #define CH_NAME_MAX    23
 #define CH_SECRET_MAX  47
 

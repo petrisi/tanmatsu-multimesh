@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include "base64.h"
 #include "dedup.h"
 #include "esp_log.h"
 #include "mesh_net.h"
@@ -89,34 +90,35 @@ static void meshcore_get_config(lora_protocol_config_params_t* out) {
     radio_cfg_load(out, &from_nvs);
 }
 
-static int hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
+// MeshCore has three ways to arrive at a channel key, and which one applies is
+// decided by what the user typed:
+//
+//   an explicit base64 PSK   a private channel, 16 or 32 bytes
+//   a name starting with '#' a hashtag channel -- the key is SHA256 of the
+//                            name, so anyone who knows the name can join. That
+//                            is the point: they are topic rooms, not secrets.
+//   neither                  the well-known public channel
+//
+// The PSK is base64, not hex: that is the format MeshCore clients exchange.
 static void meshcore_prepare_channel(channel_t* channel) {
     channel->ready   = false;
     channel->key_len = 0;
 
-    // An empty secret means the well-known public channel rather than an error:
-    // it is what a new install should join by default.
-    if (channel->secret[0] == '\0') {
-        memcpy(channel->key, MC_PUBLIC_CHANNEL_KEY, MC_CIPHER_KEY_SIZE);
+    if (channel->secret[0] != '\0') {
+        uint8_t raw[32];
+        int     len = base64_decode(channel->secret, raw, sizeof(raw));
+        if (len != 16 && len != 32) return;  // MeshCore accepts only these two
+        memcpy(channel->key, raw, (size_t)len);
+        channel->key_len = (uint8_t)len;
+    } else if (channel->name[0] == '#') {
+        if (!mc_derive_hashtag_key(channel->name, channel->key)) return;
         channel->key_len = MC_CIPHER_KEY_SIZE;
     } else {
-        if (strlen(channel->secret) != MC_CIPHER_KEY_SIZE * 2) return;
-        for (int i = 0; i < MC_CIPHER_KEY_SIZE; i++) {
-            int hi = hex_nibble(channel->secret[i * 2]);
-            int lo = hex_nibble(channel->secret[i * 2 + 1]);
-            if (hi < 0 || lo < 0) return;
-            channel->key[i] = (uint8_t)((hi << 4) | lo);
-        }
+        memcpy(channel->key, MC_PUBLIC_CHANNEL_KEY, MC_CIPHER_KEY_SIZE);
         channel->key_len = MC_CIPHER_KEY_SIZE;
     }
 
-    channel->hash  = mc_channel_hash(channel->key);
+    channel->hash  = mc_channel_hash(channel->key, channel->key_len);
     channel->ready = true;
 }
 
@@ -168,7 +170,7 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
         if (!ch->ready || grp.channel_hash != ch->hash) continue;
 
         mc_grp_msg_t decoded;
-        if (!mc_grp_decrypt(&grp, ch->key, &decoded)) continue;
+        if (!mc_grp_decrypt(&grp, ch->key, ch->key_len, &decoded)) continue;
 
         // MeshCore has no identity field: senders put their name in the text as
         // "Name: message". Split it so the sender column has something to show.
@@ -220,7 +222,7 @@ static uint8_t meshcore_encode(mesh_state_t* mesh, uint8_t channel, const identi
 
     uint8_t cipher[MC_MAX_PAYLOAD_SIZE];
     uint8_t mac[32];
-    if (!mc_grp_encrypt(ch->key, plain, padded, cipher, mac)) return 0;
+    if (!mc_grp_encrypt(ch->key, ch->key_len, plain, padded, cipher, mac)) return 0;
 
     uint8_t payload[MC_MAX_PAYLOAD_SIZE];
     uint8_t payload_len = mc_grp_txt_build(ch->hash, mac, cipher, (uint8_t)padded, payload, sizeof(payload));
@@ -233,12 +235,19 @@ static uint8_t meshcore_encode(mesh_state_t* mesh, uint8_t channel, const identi
     return len;
 }
 
+static const char* meshcore_local_sender(const identity_t* identity) {
+    // The name we actually put in the message text, so the echo matches what
+    // everyone else will see.
+    return identity->name;
+}
+
 const mesh_net_t mesh_net_meshcore = {
     .name            = "MeshCore",
     .tag             = "MC",
     .init            = meshcore_init,
     .get_config      = meshcore_get_config,
     .prepare_channel = meshcore_prepare_channel,
+    .local_sender    = meshcore_local_sender,
     .handle          = meshcore_handle,
     .encode          = meshcore_encode,
 };

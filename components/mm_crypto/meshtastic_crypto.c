@@ -16,11 +16,15 @@ static const uint8_t MT_DEFAULT_PSK[16] = {
 bool mt_key_expand(const uint8_t* psk, size_t psk_len, mt_key_t* out) {
     if (out == NULL) return false;
     memset(out, 0, sizeof(*out));
-    if (psk == NULL || psk_len == 0) return false;
+    if (psk_len > MT_MAX_KEY_SIZE) return false;
+
+    // No PSK at all: the channel is unencrypted. length 0 is a valid key here,
+    // and the cipher becomes a pass-through.
+    if (psk == NULL || psk_len == 0) return true;
 
     if (psk_len == 1) {
         uint8_t index = psk[0];
-        if (index == 0) return false;  // encryption explicitly disabled
+        if (index == 0) return true;  // encryption explicitly disabled
         memcpy(out->bytes, MT_DEFAULT_PSK, sizeof(MT_DEFAULT_PSK));
         out->length = sizeof(MT_DEFAULT_PSK);
         // Index 1 means the default key unchanged; each further index bumps the
@@ -29,7 +33,6 @@ bool mt_key_expand(const uint8_t* psk, size_t psk_len, mt_key_t* out) {
         return true;
     }
 
-    if (psk_len > MT_MAX_KEY_SIZE) return false;
     memcpy(out->bytes, psk, psk_len);
     // Short keys are zero-padded up to the next real AES size.
     out->length = (psk_len <= 16) ? 16 : 32;
@@ -51,6 +54,11 @@ uint8_t mt_channel_hash(const char* name, const mt_key_t* key) {
 
 bool mt_decrypt(const mt_key_t* key, uint32_t from_node, uint32_t packet_id, uint8_t* data, size_t length) {
     if (key == NULL || data == NULL || length == 0) return false;
+
+    // An unencrypted channel: the payload is already plaintext, so succeeding
+    // without touching it is the correct behaviour, not a silent failure.
+    if (key->length == 0) return true;
+
     if (key->length != 16 && key->length != 32) return false;
 
     uint8_t nonce[16] = {0};

@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "base64.h"
 #include "dedup.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -122,40 +123,20 @@ static void meshtastic_get_config(lora_protocol_config_params_t* out) {
     out->ramp_time                  = 200;
 }
 
-// Decode base64 into `out`. Meshtastic PSKs are carried as base64 in every
-// client, so that is what the editor accepts.
-static int base64_decode(const char* in, uint8_t* out, int out_max) {
-    static const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    uint32_t           acc = 0;
-    int                bits = 0, len = 0;
-
-    for (const char* p = in; *p; p++) {
-        if (*p == '=' || *p == '\n' || *p == '\r') continue;
-        const char* pos = strchr(alphabet, *p);
-        if (!pos) return -1;
-        acc   = (acc << 6) | (uint32_t)(pos - alphabet);
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            if (len >= out_max) return -1;
-            out[len++] = (uint8_t)(acc >> bits);
-        }
-    }
-    return len;
-}
-
 static void meshtastic_prepare_channel(channel_t* channel) {
     channel->ready   = false;
     channel->key_len = 0;
 
+    // An empty PSK is valid and means an unencrypted channel, so only a
+    // malformed one (negative) is a failure.
     uint8_t raw[MT_MAX_KEY_SIZE];
     int     raw_len = base64_decode(channel->secret, raw, sizeof(raw));
-    if (raw_len <= 0) return;
+    if (raw_len < 0) return;
 
     mt_key_t expanded;
     if (!mt_key_expand(raw, (size_t)raw_len, &expanded)) return;
 
-    memcpy(channel->key, expanded.bytes, expanded.length);
+    if (expanded.length > 0) memcpy(channel->key, expanded.bytes, expanded.length);
     channel->key_len = (uint8_t)expanded.length;
     // The hash mixes the channel NAME as well as the key, so renaming a channel
     // changes which traffic it matches. That is upstream behaviour, not a bug.
@@ -279,12 +260,20 @@ static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const iden
     return len;
 }
 
+static const char* meshtastic_local_sender(const identity_t* identity) {
+    // Meshtastic nodes are shown by short name; other clients will label us that
+    // way once a NodeInfo goes out, so the echo should match rather than showing
+    // a truncated long name.
+    return identity->short_name[0] ? identity->short_name : identity->node_id;
+}
+
 const mesh_net_t mesh_net_meshtastic = {
     .name            = "Meshtastic",
     .tag             = "MT",
     .init            = meshtastic_init,
     .get_config      = meshtastic_get_config,
     .prepare_channel = meshtastic_prepare_channel,
+    .local_sender    = meshtastic_local_sender,
     .handle          = meshtastic_handle,
     .encode          = meshtastic_encode,
 };
