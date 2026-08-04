@@ -1,0 +1,12 @@
+{
+  "name": "MultiMesh",
+  "application": "fi.ps.multimesh",
+  "description": "Mesh communications for MeshCore and Meshtastic, switched with one key.",
+  "categories": ["Communication"],
+  "author": "Petri Simolin",
+  "license_type": "MIT",
+  "license_file": "LICENSE",
+  "repository": "https://github.com/",
+  "version": 32,
+  "icon": { "32x32": "icon32.png" }
+}

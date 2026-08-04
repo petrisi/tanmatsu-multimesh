@@ -159,6 +159,27 @@ static bool drain_crypto(void) {
 // and discarded instead: it can only hold something queued moments before a
 // switch, and an acknowledgement that arrives after a detour through another
 // band is too late to stop the sender retrying anyway.
+// Put MeshCore repeats on the air once their backoff has elapsed. Only while
+// MeshCore is the active network, for the same reason acknowledgements are:
+// there is one radio, and it is tuned to one network.
+static void forward_repeats(void) {
+    if (model.active != MESH_MC) return;
+
+    tx_request_t request = {.mesh = MESH_MC, .seq = UINT32_MAX};
+    while (mc_take_due_repeat(request.frame, sizeof(request.frame), &request.length)) {
+        if (xQueueSend(tx_requests, &request, 0) != pdTRUE) return;
+    }
+}
+
+// Hand the configuration to the stacks. Called at start and after every save,
+// so the two never disagree about what is in force.
+static void apply_settings(void) {
+    mc_set_repeater(model.settings.mc_repeater);
+    mc_set_location(model.settings.has_location, model.settings.latitude, model.settings.longitude);
+    mt_set_hop_limit(model.mt_active_hops);
+    mt_set_role(model.settings.mt_role);
+}
+
 static void forward_acks(void) {
     for (int i = 0; i < MESH_COUNT; i++) {
         if (nets[i]->take_pending_ack == NULL) continue;
@@ -1199,6 +1220,208 @@ static void handle_node_short_key(bsp_input_navigation_key_t key) {
     }
 }
 
+// --- screen power --------------------------------------------------------
+//
+// The backlight is most of what the display costs, and the BSP exposes only its
+// brightness -- so "off" is brightness zero, with the panel and the radio still
+// running. Messages keep arriving while it is dark, which is the point: this is
+// a power measure, not a sleep mode.
+
+static uint32_t last_input_ms;
+static bool     screen_dark;
+static uint8_t  screen_brightness = 100;
+
+static void screen_wake(void) {
+    last_input_ms = now_ms();
+    if (!screen_dark) return;
+    bsp_display_set_backlight_brightness(screen_brightness);
+    screen_dark = false;
+}
+
+static void screen_tick(void) {
+    if (screen_dark || model.settings.display_off_minutes == 0) return;
+    uint32_t idle = now_ms() - last_input_ms;
+    if (idle < (uint32_t)model.settings.display_off_minutes * 60000u) return;
+
+    // Remember what it was, so waking restores the user's brightness rather
+    // than an assumption about it.
+    uint8_t current = 0;
+    if (bsp_display_get_backlight_brightness(&current) == ESP_OK && current > 0) screen_brightness = current;
+    bsp_display_set_backlight_brightness(0);
+    screen_dark = true;
+}
+
+// --- configuration -------------------------------------------------------
+
+// Coordinates travel as millionths of a degree, which is what MeshCore carries
+// and what avoids floating point in the packet path entirely.
+static void coord_to_text(char* out, size_t out_size, int32_t millionths) {
+    int32_t whole = millionths / 1000000;
+    int32_t frac  = millionths % 1000000;
+    if (frac < 0) frac = -frac;
+    snprintf(out, out_size, "%s%ld.%06ld", (millionths < 0 && whole == 0) ? "-" : "", (long)whole, (long)frac);
+}
+
+// Parse decimal degrees without strtod: the fractional part is read as a fixed
+// six digits so "61.5" and "61.500000" mean the same thing, and rounding never
+// depends on a library's idea of a double.
+static bool text_to_coord(const char* text, int32_t* out, int32_t limit) {
+    if (text == NULL || text[0] == '\0') return false;
+
+    int i = 0;
+    bool negative = text[i] == '-';
+    if (negative || text[i] == '+') i++;
+    if (text[i] == '\0') return false;
+
+    int64_t whole = 0;
+    bool    digits = false;
+    for (; text[i] >= '0' && text[i] <= '9'; i++) {
+        whole = whole * 10 + (text[i] - '0');
+        digits = true;
+        if (whole > 200) return false;
+    }
+    if (!digits) return false;
+
+    int64_t frac = 0;
+    if (text[i] == '.' || text[i] == ',') {
+        i++;
+        for (int d = 0; d < 6; d++) {
+            if (text[i] >= '0' && text[i] <= '9') {
+                frac = frac * 10 + (text[i] - '0');
+                i++;
+            } else {
+                frac *= 10;  // pad, so ".5" is half a degree rather than 5 millionths
+            }
+        }
+        while (text[i] >= '0' && text[i] <= '9') i++;  // ignore precision we cannot carry
+    }
+    if (text[i] != '\0') return false;  // trailing rubbish
+
+    int64_t value = whole * 1000000 + frac;
+    if (value > (int64_t)limit * 1000000) return false;
+    *out = (int32_t)(negative ? -value : value);
+    return true;
+}
+
+// Coordinates are typed, so they are held as text while the screen is open and
+// only become numbers on save: half a number is not a number, and rejecting it
+// keystroke by keystroke would make it impossible to type a minus sign.
+static void settings_open(void) {
+    if (model.settings.has_location) {
+        char buf[SET_COORD_MAX + 1];
+        coord_to_text(buf, sizeof(buf), model.settings.latitude);
+        snprintf(model.lat_text, sizeof(model.lat_text), "%s", buf);
+        coord_to_text(buf, sizeof(buf), model.settings.longitude);
+        snprintf(model.lon_text, sizeof(model.lon_text), "%s", buf);
+    } else {
+        model.lat_text[0] = '\0';
+        model.lon_text[0] = '\0';
+    }
+    model.setting_index = 0;
+    model.overlay       = OVERLAY_SETTINGS;
+}
+
+// Both coordinates or neither: a latitude without a longitude is not a place,
+// and publishing half of one would be worse than publishing none.
+static bool settings_commit(void) {
+    int32_t lat = 0, lon = 0;
+    bool    have_lat = text_to_coord(model.lat_text, &lat, 90);
+    bool    have_lon = text_to_coord(model.lon_text, &lon, 180);
+
+    if (model.lat_text[0] || model.lon_text[0]) {
+        if (!have_lat || !have_lon) {
+            toast("need both latitude and longitude");
+            return false;
+        }
+        model.settings.has_location = true;
+        model.settings.latitude     = lat;
+        model.settings.longitude    = lon;
+    } else {
+        model.settings.has_location = false;
+    }
+
+    settings_save_config(&model);
+    apply_settings();
+    return true;
+}
+
+static void setting_step(setting_field_t field, int delta) {
+    settings_t* s = &model.settings;
+
+    switch (field) {
+        case SET_FIELD_DISPLAY_OFF: {
+            int v = (int)s->display_off_minutes + delta;
+            if (v < 0) v = 0;
+            if (v > 120) v = 120;
+            s->display_off_minutes = (uint8_t)v;
+            break;
+        }
+        case SET_FIELD_MT_HOPS: {
+            int v = (int)s->mt_default_hops + delta;
+            if (v < 0) v = 0;
+            if (v > SET_HOPS_MAX_STORED) v = SET_HOPS_MAX_STORED;
+            s->mt_default_hops = (uint8_t)v;
+            // Adjusting the stored default here also takes effect now; a session
+            // override set with fn is what survives this, not the other way.
+            model.mt_active_hops = s->mt_default_hops;
+            break;
+        }
+        case SET_FIELD_MT_ROLE:
+            s->mt_role = s->mt_role == MT_ROLE_CLIENT ? MT_ROLE_CLIENT_MUTE : MT_ROLE_CLIENT;
+            break;
+        case SET_FIELD_MC_REPEATER: s->mc_repeater = !s->mc_repeater; break;
+        default: break;  // the coordinates are typed, not stepped
+    }
+}
+
+static char* setting_focused_text(int* out_max) {
+    setting_field_t fields[SET_FIELD_COUNT];
+    int             count = settings_visible_fields(model.active, fields, SET_FIELD_COUNT);
+    if (model.setting_index < 0 || model.setting_index >= count) return NULL;
+
+    *out_max = SET_COORD_MAX;
+    if (fields[model.setting_index] == SET_FIELD_LATITUDE) return model.lat_text;
+    if (fields[model.setting_index] == SET_FIELD_LONGITUDE) return model.lon_text;
+    return NULL;
+}
+
+static void handle_settings_key(bsp_input_navigation_key_t key) {
+    setting_field_t fields[SET_FIELD_COUNT];
+    int             count = settings_visible_fields(model.active, fields, SET_FIELD_COUNT);
+    if (count < 1) return;
+
+    switch (key) {
+        case BSP_INPUT_NAVIGATION_KEY_UP:
+            model.setting_index = (model.setting_index - 1 + count) % count;
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_DOWN:
+        case BSP_INPUT_NAVIGATION_KEY_TAB:
+            model.setting_index = (model.setting_index + 1) % count;
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_LEFT: setting_step(fields[model.setting_index], -1); break;
+        case BSP_INPUT_NAVIGATION_KEY_RIGHT: setting_step(fields[model.setting_index], +1); break;
+        case BSP_INPUT_NAVIGATION_KEY_BACKSPACE: {
+            int   max   = 0;
+            char* field = setting_focused_text(&max);
+            if (field) field_backspace(field);
+            break;
+        }
+        case BSP_INPUT_NAVIGATION_KEY_RETURN:
+            if (settings_commit()) {
+                model.overlay = OVERLAY_NONE;
+                toast("settings saved");
+            }
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_ESC:
+        case BSP_INPUT_NAVIGATION_KEY_F1:
+            // Reload, so a cancelled edit leaves nothing behind.
+            settings_load(&model);
+            model.overlay = OVERLAY_NONE;
+            break;
+        default: break;
+    }
+}
+
 // The picker is one list: channels first, then contacts. An index past the
 // channel count is a contact, which is what makes "send to" a single choice
 // rather than two settings that can disagree.
@@ -1277,6 +1500,7 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
         case OVERLAY_NODES: handle_nodes_key(key); return;
         case OVERLAY_NODE_DETAIL: handle_node_detail_key(key); return;
         case OVERLAY_NODE_SHORT: handle_node_short_key(key); return;
+        case OVERLAY_SETTINGS: handle_settings_key(key); return;
         case OVERLAY_DETAIL:
             if (key == BSP_INPUT_NAVIGATION_KEY_ESC || key == BSP_INPUT_NAVIGATION_KEY_F1 ||
                 key == BSP_INPUT_NAVIGATION_KEY_RETURN) {
@@ -1390,6 +1614,8 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
             }
             break;
 
+        case BSP_INPUT_NAVIGATION_KEY_VOLUME_DOWN: settings_open(); break;
+
         case BSP_INPUT_NAVIGATION_KEY_TAB: next_channel(1); break;
         case BSP_INPUT_NAVIGATION_KEY_RETURN: composer_send(); break;
         case BSP_INPUT_NAVIGATION_KEY_BACKSPACE: composer_backspace(); break;
@@ -1480,6 +1706,8 @@ void app_main(void) {
     settings_apply_default_channels(&model);
 
     if (!crypto_jobs_init()) ESP_LOGE(TAG, "public-key work will not run");
+
+    apply_settings();
 
     for (int i = 0; i < MESH_COUNT; i++) {
         if (!nets[i]->init()) ESP_LOGE(TAG, "%s stack init failed", nets[i]->name);
@@ -1597,6 +1825,16 @@ void app_main(void) {
         bool              dirty = false;
 
         if (xQueueReceive(input_event_queue, &event, pdMS_TO_TICKS(120)) == pdTRUE) {
+            // Any press while the screen is dark only turns it back on. It is
+            // swallowed rather than acted on: reaching for the light should not
+            // also type a character or switch networks.
+            bool was_dark = screen_dark;
+            screen_wake();
+            if (was_dark) {
+                dirty = true;
+                goto woke;
+            }
+
             // Any interaction means the user is looking, so the unread blink
             // has done its job.
             leds_clear_unread();
@@ -1610,6 +1848,24 @@ void app_main(void) {
                     break;
 
                 case INPUT_EVENT_TYPE_KEYBOARD:
+                    // fn plus a digit sets the hop limit for this session only.
+                    // It reaches past the stored maximum on purpose: a limit
+                    // worth raising to get one message out is not one worth
+                    // making permanent, and it is forgotten at the next start.
+                    if ((event.args_keyboard.modifiers & BSP_INPUT_MODIFIER_FUNCTION) &&
+                        event.args_keyboard.utf8[0] >= '0' && event.args_keyboard.utf8[0] <= '7' &&
+                        event.args_keyboard.utf8[1] == '\0') {
+                        if (model.active == MESH_MT) {
+                            model.mt_active_hops = (uint8_t)(event.args_keyboard.utf8[0] - '0');
+                            mt_set_hop_limit(model.mt_active_hops);
+                            toast("hop limit %u for this session", (unsigned)model.mt_active_hops);
+                        } else {
+                            toast("hop limit is a Meshtastic setting");
+                        }
+                        dirty = true;
+                        break;
+                    }
+
                     if (event.args_keyboard.utf8[0] && (unsigned char)event.args_keyboard.utf8[0] >= 0x20 &&
                         !space_is_bounce(event.args_keyboard.utf8)) {
                         // Applied once, here, so every text field gets the same
@@ -1624,6 +1880,12 @@ void app_main(void) {
                             case OVERLAY_NODE_SHORT:
                                 field_append(model.node_short_edit, NODE_SHORT_MAX, text);
                                 break;
+                            case OVERLAY_SETTINGS: {
+                                int   max   = 0;
+                                char* field = setting_focused_text(&max);
+                                if (field) field_append(field, max, text);
+                                break;
+                            }
                             case OVERLAY_NONE:
                                 if (model_active(&model)->selected_seq < 0) composer_append(text);
                                 break;
@@ -1636,11 +1898,14 @@ void app_main(void) {
                 default: break;
             }
         }
+    woke:
+        screen_tick();
 
         if (radio_poll()) dirty = true;
         if (drain_tx_events()) dirty = true;
         if (drain_crypto()) dirty = true;
         forward_acks();
+        forward_repeats();
         if (poll_power()) dirty = true;
         if (housekeeping()) dirty = true;
         if (tx_settle()) dirty = true;

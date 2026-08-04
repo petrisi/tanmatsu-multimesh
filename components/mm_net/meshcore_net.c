@@ -11,6 +11,8 @@
 #include "ed25519.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mesh_net.h"
 #include "meshcore_crypto.h"
 #include "meshcore_net.h"
@@ -102,6 +104,142 @@ static bool credit_repeat(mesh_state_t* mesh, const uint8_t* payload, uint8_t pa
         return true;
     }
     return false;
+}
+
+// --- configuration pushed in from the settings screen --------------------
+
+static bool    repeater_on = false;
+static bool    advert_has_location = false;
+static int32_t advert_latitude, advert_longitude;
+
+void mc_set_repeater(bool on) {
+    repeater_on = on;
+}
+
+void mc_set_location(bool has, int32_t latitude, int32_t longitude) {
+    advert_has_location = has;
+    advert_latitude     = latitude;
+    advert_longitude    = longitude;
+}
+
+// --- repeating -----------------------------------------------------------
+//
+// Off by default. When on we behave as an extra repeater: everything heard that
+// is new and not addressed to us goes back out, with our own hash appended so
+// the path records that it came through here.
+//
+// The delay is the whole difficulty. Every repeater in earshot hears the same
+// packet at the same instant, so retransmitting immediately means they all
+// transmit together and destroy what they were trying to relay. Upstream
+// scatters them over a few packet-airtimes at random, and so do we -- which
+// means a queue that holds a frame until its moment, since our transmitter
+// otherwise sends the instant it is handed something.
+#define MAX_PENDING_REPEATS 6
+
+typedef struct {
+    bool     active;
+    uint32_t due_ms;
+    uint8_t  frame[MC_MAX_PAYLOAD_SIZE + MC_MAX_PATH_SIZE + 8];
+    uint8_t  length;
+} pending_repeat_t;
+
+static pending_repeat_t repeats[MAX_PENDING_REPEATS];
+
+static uint32_t uptime_ms(void) {
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+// Roughly upstream's figure: half a packet airtime, scattered over five slots.
+// Airtime is estimated from the length rather than measured -- the point is the
+// spread, not the precision.
+static uint32_t repeat_backoff_ms(uint8_t frame_len) {
+    uint32_t airtime = 120 + (uint32_t)frame_len * 9;  // ms, SF8 / BW62.5 / CR4/8
+    uint32_t slot    = (airtime * 52 / 50) / 2;
+    return (esp_random() % 5) * slot;
+}
+
+static void queue_repeat(const uint8_t* frame, uint8_t len) {
+    for (int i = 0; i < MAX_PENDING_REPEATS; i++) {
+        if (repeats[i].active) continue;
+        memcpy(repeats[i].frame, frame, len);
+        repeats[i].length = len;
+        repeats[i].due_ms = uptime_ms() + repeat_backoff_ms(len);
+        repeats[i].active = true;
+        return;
+    }
+    // Dropping is correct when the backlog is this deep: the mesh is already
+    // saturated and adding to it helps nobody.
+    session_log("repeat.drop reason=queue_full");
+}
+
+bool mc_take_due_repeat(uint8_t* out, size_t out_max, uint8_t* out_len) {
+    if (out == NULL || out_len == NULL) return false;
+    uint32_t now = uptime_ms();
+
+    for (int i = 0; i < MAX_PENDING_REPEATS; i++) {
+        if (!repeats[i].active || repeats[i].length > out_max) continue;
+        if ((int32_t)(now - repeats[i].due_ms) < 0) continue;
+
+        memcpy(out, repeats[i].frame, repeats[i].length);
+        *out_len          = repeats[i].length;
+        repeats[i].active = false;
+        return true;
+    }
+    return false;
+}
+
+// Put a heard packet back on the air, if we are repeating and it is ours to
+// relay. `for_us` marks traffic we consumed, which nobody else needs from us.
+static void maybe_repeat(const mc_packet_t* packet, const identity_t* identity, const uint8_t* raw, uint8_t raw_len,
+                         bool for_us) {
+    if (!repeater_on || for_us || !identity->has_keypair) return;
+
+    uint8_t width = packet->bytes_per_hop;
+    uint8_t frame[MC_MAX_PAYLOAD_SIZE + MC_MAX_PATH_SIZE + 8];
+
+    if (packet->route == MC_ROUTE_FLOOD || packet->route == MC_ROUTE_TRANSPORT_FLOOD) {
+        // Append ourselves at the packet's own width, not our preferred one --
+        // the width belongs to the packet, and mixing them corrupts the path
+        // for everyone downstream.
+        if ((uint32_t)(packet->hop_count + 1) * width > MC_MAX_PATH_SIZE) return;  // no room; let it die here
+
+        uint8_t path[MC_MAX_PATH_SIZE];
+        memcpy(path, packet->path, packet->path_length);
+        memcpy(&path[packet->hop_count * width], identity->public_key, width);
+
+        uint8_t ctrl = MC_PATH_CTRL(packet->hop_count + 1, width);
+        uint8_t len  = mc_packet_build(packet->type, MC_ROUTE_FLOOD, ctrl, path, packet->payload,
+                                       packet->payload_length, frame, sizeof(frame));
+        if (len == 0) return;
+        queue_repeat(frame, len);
+        session_log("repeat.flood type=%s hops=%u->%u", mc_payload_type_name(packet->type),
+                    (unsigned)packet->hop_count, (unsigned)packet->hop_count + 1);
+        return;
+    }
+
+    // Directed: only the node named by the leading hop forwards it, and it
+    // strips itself off on the way. No backoff is needed, since exactly one
+    // node answers to that hop.
+    if (packet->hop_count == 0) return;
+    if (memcmp(packet->path, identity->public_key, width) != 0) return;
+
+    uint8_t remaining = (uint8_t)(packet->hop_count - 1);
+    uint8_t ctrl      = MC_PATH_CTRL(remaining, width);
+    uint8_t len = mc_packet_build(packet->type, MC_ROUTE_DIRECT, ctrl, packet->path + width, packet->payload,
+                                  packet->payload_length, frame, sizeof(frame));
+    if (len == 0) return;
+
+    for (int i = 0; i < MAX_PENDING_REPEATS; i++) {
+        if (repeats[i].active) continue;
+        memcpy(repeats[i].frame, frame, len);
+        repeats[i].length = len;
+        repeats[i].due_ms = uptime_ms();  // immediately
+        repeats[i].active = true;
+        session_log("repeat.direct type=%s hops_left=%u", mc_payload_type_name(packet->type), (unsigned)remaining);
+        return;
+    }
+    (void)raw;
+    (void)raw_len;
 }
 
 // --- acknowledgements ----------------------------------------------------
@@ -214,6 +352,7 @@ static bool meshcore_init(void) {
     dedup_reset(&dm_seen);
     memset(pending, 0, sizeof(pending));
     memset(acks, 0, sizeof(acks));
+    memset(repeats, 0, sizeof(repeats));
     return mc_crypto_init();
 }
 
@@ -613,24 +752,32 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
                          mc_role_name(advert.role));
             }
         }
+        maybe_repeat(&packet, identity, pkt->data, pkt->length, false);
         detail(mesh);
         return false;
     }
 
     if (packet.type == MC_PAYLOAD_TXT_MSG) {
         bool shown = handle_datagram(&packet, mesh, identity, pkt);
+        // Addressed to us and read: nobody downstream needs it from us. Not for
+        // us and we are repeating: pass it on.
+        maybe_repeat(&packet, identity, pkt->data, pkt->length,
+                     identity->has_keypair && packet.payload_length > 0 &&
+                         packet.payload[0] == identity->public_key[0]);
         detail(mesh);
         return shown;
     }
 
     if (packet.type == MC_PAYLOAD_ACK) {
         bool matched = handle_ack(&packet, mesh);
+        maybe_repeat(&packet, identity, pkt->data, pkt->length, matched);
         detail(mesh);
         return matched;
     }
 
     if (packet.type == MC_PAYLOAD_PATH) {
         bool matched = handle_path_return(&packet, mesh, identity);
+        maybe_repeat(&packet, identity, pkt->data, pkt->length, matched);
         detail(mesh);
         return matched;
     }
@@ -692,11 +839,15 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
         mesh->stats.messages++;
         detail(mesh);
         ESP_LOGI(TAG, "msg [%d dBm %u hops] %s", msg->rssi_dbm, packet.hop_count, body);
+        // A channel message is for everyone on that channel, so reading it is
+        // no reason to stop it reaching the next node.
+        maybe_repeat(&packet, identity, pkt->data, pkt->length, false);
         return true;
     }
 
     // The hash matched nothing, or every MAC failed: a channel we hold no key for.
     mesh->stats.not_our_channel++;
+    maybe_repeat(&packet, identity, pkt->data, pkt->length, false);
     detail(mesh);
     return false;
 }
@@ -824,6 +975,11 @@ static uint8_t meshcore_encode_advert(mesh_state_t* mesh, uint8_t channel, const
     memcpy(advert.pub_key, identity->public_key, MC_PUB_KEY_SIZE);
     advert.timestamp = (uint32_t)time(NULL);
     advert.role      = MC_ROLE_CHAT_NODE;
+    if (advert_has_location) {
+        advert.has_position = true;
+        advert.latitude     = advert_latitude;
+        advert.longitude    = advert_longitude;
+    }
     if (identity->name[0]) {
         snprintf(advert.name, sizeof(advert.name), "%s", identity->name);
         advert.has_name = true;

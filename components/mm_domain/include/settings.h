@@ -34,6 +34,9 @@ void settings_save_identity(const app_model_t* model);
 // Active network, metadata column, and each network's selected input channel.
 void settings_save_prefs(const app_model_t* model);
 
+// The configuration screen's contents. Loaded by settings_load() with the rest.
+void settings_save_config(const app_model_t* model);
+
 // The channels a first run should start with: the well-known public channel on
 // MeshCore and EdgeFastLow on Meshtastic. Both use published keys -- neither is
 // a secret, and both are what their networks expect a new node to join.

@@ -524,6 +524,21 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
 #define MT_BROADCAST_ADDR 0xFFFFFFFFu
 #define MT_DEFAULT_HOPS   3
 
+// The hop limit in force. Pushed in from the configuration rather than read
+// from the model, so the stack stays a consumer of settings rather than a
+// reader of application state.
+static uint8_t active_hops = MT_DEFAULT_HOPS;
+
+void mt_set_hop_limit(uint8_t hops) {
+    active_hops = hops > SET_HOPS_MAX_SESSION ? SET_HOPS_MAX_SESSION : hops;
+}
+
+static uint8_t advertised_role = MT_ROLE_CLIENT_MUTE;
+
+void mt_set_role(uint8_t role) {
+    advertised_role = role;
+}
+
 // Everything we transmit goes through here: wrap an application payload in a
 // Data submessage, encrypt it, and build the broadcast header. `msg_seq` of
 // UINT32_MAX means there is no message row to credit repeats to.
@@ -549,7 +564,7 @@ static uint8_t encode_frame(mesh_state_t* mesh, uint8_t channel, const identity_
     if (!mt_encrypt(&key, identity->node_num, id, payload, payload_len)) return 0;
 
     // Nobody acknowledges a broadcast, so want_ack is never set here.
-    uint8_t len = mt_packet_build(MT_BROADCAST_ADDR, identity->node_num, id, MT_DEFAULT_HOPS, ch->hash, false,
+    uint8_t len = mt_packet_build(MT_BROADCAST_ADDR, identity->node_num, id, active_hops, ch->hash, false,
                                   payload, (uint8_t)payload_len, out, out_max);
     if (len == 0) return 0;
 
@@ -596,7 +611,7 @@ static uint8_t encode_to_node(mesh_state_t* mesh, const identity_t* identity, co
         }
 
         // Channel hash zero is how the far end knows to try its own key.
-        uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, MT_DEFAULT_HOPS, 0, want_ack, sealed,
+        uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, active_hops, 0, want_ack, sealed,
                                       (uint8_t)(payload_len + MT_PKI_OVERHEAD), out, out_max);
         if (len == 0) return 0;
 
@@ -613,7 +628,7 @@ static uint8_t encode_to_node(mesh_state_t* mesh, const identity_t* identity, co
     if (ch->key_len) memcpy(key.bytes, ch->key, ch->key_len);
     if (!mt_encrypt(&key, identity->node_num, id, payload, payload_len)) return 0;
 
-    uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, MT_DEFAULT_HOPS, ch->hash, want_ack,
+    uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, active_hops, ch->hash, want_ack,
                                   payload, (uint8_t)payload_len, out, out_max);
     if (len == 0) return 0;
 
@@ -636,6 +651,7 @@ static uint8_t encode_nodeinfo(mesh_state_t* mesh, const identity_t* identity, c
     snprintf(user.long_name, sizeof(user.long_name), "%s", identity->name);
     snprintf(user.short_name, sizeof(user.short_name), "%s", identity->short_name);
     user.hw_model = MT_HW_PRIVATE;
+    user.role     = advertised_role;
     if (identity->has_mt_keypair) {
         memcpy(user.public_key, identity->mt_public_key, MT_PUBLIC_KEY_LEN);
         user.has_public_key = true;
@@ -702,6 +718,7 @@ static uint8_t meshtastic_encode_advert(mesh_state_t* mesh, uint8_t channel, con
     snprintf(user.long_name, sizeof(user.long_name), "%s", identity->name);
     snprintf(user.short_name, sizeof(user.short_name), "%s", identity->short_name);
     user.hw_model = MT_HW_PRIVATE;  // a Tanmatsu is not one of upstream's boards
+    user.role     = advertised_role;
     if (identity->has_mt_keypair) {
         memcpy(user.public_key, identity->mt_public_key, MT_PUBLIC_KEY_LEN);
         user.has_public_key = true;

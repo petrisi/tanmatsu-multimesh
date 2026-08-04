@@ -47,6 +47,30 @@ void model_init(app_model_t* model) {
     model->history_pos = -1;
     model->battery_pct = 100;
     model->time_synced = false;
+
+    model->settings.display_off_minutes = SET_DISPLAY_OFF_DEFAULT;
+    model->settings.mt_default_hops     = 3;
+    // CLIENT_MUTE, because it is the one that is true: it says we do not relay
+    // other people's traffic, and we do not. Advertising CLIENT would invite
+    // neighbours to route through a node that silently drops everything.
+    model->settings.mt_role   = MT_ROLE_CLIENT_MUTE;
+    model->settings.mc_repeater = false;
+    model->mt_active_hops       = model->settings.mt_default_hops;
+}
+
+int settings_visible_fields(mesh_id_t active, setting_field_t* out, int max) {
+    static const setting_field_t shared[] = {SET_FIELD_LATITUDE, SET_FIELD_LONGITUDE, SET_FIELD_DISPLAY_OFF};
+    static const setting_field_t mt[]     = {SET_FIELD_MT_HOPS, SET_FIELD_MT_ROLE};
+    static const setting_field_t mc[]     = {SET_FIELD_MC_REPEATER};
+
+    int n = 0;
+    for (size_t i = 0; i < sizeof(shared) / sizeof(shared[0]) && n < max; i++) out[n++] = shared[i];
+
+    const setting_field_t* own   = active == MESH_MT ? mt : mc;
+    size_t                 count = active == MESH_MT ? sizeof(mt) / sizeof(mt[0]) : sizeof(mc) / sizeof(mc[0]);
+    for (size_t i = 0; i < count && n < max; i++) out[n++] = own[i];
+
+    return n;
 }
 
 message_t* model_push(mesh_state_t* mesh, uint8_t channel, const char* sender, bool sender_named, const char* text,

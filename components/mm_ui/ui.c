@@ -39,6 +39,8 @@ static const char TAG[] = "ui";
 #define COL_BAD     0xFFE24B4B
 #define COL_DM      0xFFE0A0FF  // conversations, distinct from every channel colour
 #define COL_RISK    0xFFF08030  // allowed, but unlikely to survive the trip
+#define COL_MC_ARC  0xFF4FA8FF  // the two networks on the boot mast, bright enough
+#define COL_MT_ARC  0xFF5FD07A  // to read as colour rather than tint
 
 // Keycap colours, matched to the physical legends on the top row.
 #define KEY_RED    0xFFE24B4B
@@ -134,6 +136,48 @@ bool ui_init(void) {
     return true;
 }
 
+// The boot screen: a transmitting mast over the wordmark. Pure ASCII, because
+// the only monospace font here covers Latin-1 and nothing more -- no box drawing
+// and no block glyphs, so the art is built from brackets and slashes.
+//
+// The arcs run blue on the left and green on the right, the two networks meeting
+// at the antenna, which is the whole idea of the application in one picture.
+
+// Each line is centred on the mast, so every one is an odd number of columns.
+static const char* const BOOT_MAST[] = {
+    "((  o  ))", "((     |     ))", "((        |        ))", "/|\\", "/ | \\", "_____/__|__\\_____",
+};
+
+// 5x5 letters, one blank column between them.
+static const char* const GLYPH_MULTI[5] = {
+    "#   # #   # #     ##### #####", "## ## #   # #       #     #  ", "# # # #   # #       #     #  ",
+    "#   # #   # #       #     #  ", "#   #  ###  #####   #   #####",
+};
+static const char* const GLYPH_MESH[5] = {
+    "#   # #####  #### #   #", "## ## #     #     #   #", "# # # ####   ###  #####",
+    "#   # #         # #   #", "#   # ##### ####  #   #",
+};
+
+static void boot_centred(const char* text, float y, pax_col_t col) {
+    float w = (float)strlen(text) * CHAR_W;
+    pax_draw_text(&fb, col, FONT, FONT_SIZE, (ui_w - w) / 2, y, text);
+}
+
+// Draw one mast line with its left half blue and its right half green, split at
+// the mast itself.
+static void boot_mast_line(const char* text, float y) {
+    size_t len   = strlen(text);
+    float  x     = (ui_w - (float)len * CHAR_W) / 2;
+    size_t middle = len / 2;
+
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] == ' ') continue;
+        char glyph[2] = {text[i], '\0'};
+        pax_col_t col = i < middle ? COL_MC_ARC : (i > middle ? COL_MT_ARC : COL_TEXT);
+        pax_draw_text(&fb, col, FONT, FONT_SIZE, x + (float)i * CHAR_W, y, glyph);
+    }
+}
+
 void ui_boot_line(const char* fmt, ...) {
     char    line[128];
     va_list args;
@@ -145,8 +189,21 @@ void ui_boot_line(const char* fmt, ...) {
     if (!have_display) return;
 
     pax_background(&fb, COL_BG);
-    pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, 8, 8, "MultiMesh");
-    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, 8, 8 + LINE_H * 2, line);
+
+    float y = LINE_H;
+    for (size_t i = 0; i < sizeof(BOOT_MAST) / sizeof(BOOT_MAST[0]); i++, y += LINE_H) {
+        boot_mast_line(BOOT_MAST[i], y);
+    }
+
+    y += LINE_H;
+    for (int i = 0; i < 5; i++, y += LINE_H) boot_centred(GLYPH_MULTI[i], y, COL_TEXT);
+    for (int i = 0; i < 5; i++, y += LINE_H) boot_centred(GLYPH_MESH[i], y, COL_TEXT);
+
+    y += LINE_H;
+    boot_centred("MeshCore  +  Meshtastic", y, COL_DIM);
+
+    y += LINE_H * 2;
+    boot_centred(line, y, COL_SEP);
     blit();
 }
 
@@ -1505,6 +1562,125 @@ static void draw_node_short(const app_model_t* model) {
     hint_text(hx, y, "enter save");
 }
 
+// Render a stored coordinate for display. Kept in millionths on the wire, which
+// is what MeshCore carries, so the decimal point goes back in here.
+static void coord_text(char* out, size_t out_size, int32_t millionths) {
+    int32_t whole = millionths / 1000000;
+    int32_t frac  = millionths % 1000000;
+    if (frac < 0) frac = -frac;
+    snprintf(out, out_size, "%s%ld.%06ld", (millionths < 0 && whole == 0) ? "-" : "", (long)whole, (long)frac);
+}
+
+static void setting_row(const app_model_t* model, setting_field_t field, char* label, size_t label_size, char* value,
+                        size_t value_size, pax_col_t* col) {
+    const settings_t* s = &model->settings;
+    *col                = COL_TEXT;
+
+    switch (field) {
+        case SET_FIELD_LATITUDE:
+            snprintf(label, label_size, "Latitude");
+            snprintf(value, value_size, "%s", model->lat_text[0] ? model->lat_text : "not set");
+            if (!model->lat_text[0]) *col = COL_DIM;
+            break;
+        case SET_FIELD_LONGITUDE:
+            snprintf(label, label_size, "Longitude");
+            snprintf(value, value_size, "%s", model->lon_text[0] ? model->lon_text : "not set");
+            if (!model->lon_text[0]) *col = COL_DIM;
+            break;
+        case SET_FIELD_DISPLAY_OFF:
+            snprintf(label, label_size, "Screen off");
+            if (s->display_off_minutes == 0) {
+                snprintf(value, value_size, "never");
+                *col = COL_DIM;
+            } else {
+                snprintf(value, value_size, "%u min", (unsigned)s->display_off_minutes);
+            }
+            break;
+        case SET_FIELD_MT_HOPS:
+            snprintf(label, label_size, "Hop limit");
+            // Both numbers, because they differ whenever a session has raised
+            // it and only one of them survives a restart.
+            if (model->mt_active_hops != s->mt_default_hops) {
+                snprintf(value, value_size, "%u  (now %u)", (unsigned)s->mt_default_hops,
+                         (unsigned)model->mt_active_hops);
+            } else {
+                snprintf(value, value_size, "%u", (unsigned)s->mt_default_hops);
+            }
+            break;
+        case SET_FIELD_MT_ROLE:
+            snprintf(label, label_size, "Role");
+            snprintf(value, value_size, "%s", s->mt_role == MT_ROLE_CLIENT ? "CLIENT" : "CLIENT_MUTE");
+            break;
+        case SET_FIELD_MC_REPEATER:
+            snprintf(label, label_size, "Repeater");
+            snprintf(value, value_size, "%s", s->mc_repeater ? "on" : "off");
+            *col = s->mc_repeater ? COL_WARN : COL_DIM;
+            break;
+        default: break;
+    }
+}
+
+static void draw_settings(const app_model_t* model) {
+    const mesh_state_t* mesh = &model->mesh[model->active];
+
+    setting_field_t fields[SET_FIELD_COUNT];
+    int             count = settings_visible_fields(model->active, fields, SET_FIELD_COUNT);
+
+    float bw = 50 * CHAR_W;
+    float bh = LINE_H * (count + 8) + 12;
+    float bx, by;
+
+    char title[40];
+    snprintf(title, sizeof(title), "Settings - %s", mesh->name);
+    overlay_box(bw, bh, &bx, &by, mesh->accent, title);
+
+    float y  = by + 8 + LINE_H * 1.5f;
+    float vx = bx + 14 + 13 * CHAR_W;
+
+    for (int i = 0; i < count; i++, y += LINE_H) {
+        // The network's own settings are separated from the shared ones, so it
+        // is never a guess which of the two a row belongs to.
+        if (fields[i] == SET_FIELD_MT_HOPS || fields[i] == SET_FIELD_MC_REPEATER) {
+            pax_draw_line(&fb, COL_SEP, bx + 10, y - 3, bx + bw - 10, y - 3);
+        }
+        if (i == model->setting_index) pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
+
+        char      label[24], value[40];
+        pax_col_t col;
+        setting_row(model, fields[i], label, sizeof(label), value, sizeof(value), &col);
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, label);
+        pax_draw_text(&fb, col, FONT, FONT_SIZE, vx, y, value);
+
+        // A cursor on the coordinate rows, because those are typed rather than
+        // stepped and otherwise look inert.
+        if (i == model->setting_index &&
+            (fields[i] == SET_FIELD_LATITUDE || fields[i] == SET_FIELD_LONGITUDE)) {
+            const char* txt = fields[i] == SET_FIELD_LATITUDE ? model->lat_text : model->lon_text;
+            pax_draw_rect(&fb, COL_TEXT, vx + (float)strlen(txt) * CHAR_W, y + 3, 2, LINE_H - 6);
+        }
+    }
+
+    y += 4;
+    // What the selected row actually does, since several of these are not
+    // obvious and one of them transmits your location to strangers.
+    const char* note = "";
+    switch (fields[model->setting_index < count ? model->setting_index : 0]) {
+        case SET_FIELD_LATITUDE:
+        case SET_FIELD_LONGITUDE: note = "sent in every MeshCore advert once set"; break;
+        case SET_FIELD_DISPLAY_OFF: note = "backlight only - radio keeps running"; break;
+        case SET_FIELD_MT_HOPS: note = "resets here at start; fn+0..7 for now"; break;
+        case SET_FIELD_MT_ROLE: note = "what we tell others we do with traffic"; break;
+        case SET_FIELD_MC_REPEATER: note = "repeat everything heard - costs airtime"; break;
+        default: break;
+    }
+    pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, bx + 14, y, note);
+
+    y       += LINE_H + 4;
+    float hx = bx + 12;
+    hx       = hint(hx, y, CAP_CROSS, "cancel");
+    hint_text(hx, y, "up/dn  left/right  enter save");
+}
+
 static void draw_toast(const app_model_t* model) {
     if (model->toast[0] == '\0') return;
 
@@ -1535,6 +1711,7 @@ void ui_render(const app_model_t* model) {
         case OVERLAY_NODES: draw_nodes(model); break;
         case OVERLAY_NODE_DETAIL: draw_node_detail(model); break;
         case OVERLAY_NODE_SHORT: draw_node_short(model); break;
+        case OVERLAY_SETTINGS: draw_settings(model); break;
         default: break;
     }
     blit();

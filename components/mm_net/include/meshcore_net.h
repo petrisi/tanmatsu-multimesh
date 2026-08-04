@@ -40,3 +40,12 @@ uint8_t mc_encode_dm_attempt(const identity_t* identity, const node_t* peer, con
 // scales with airtime alone, a directed send with the number of hops it must
 // cross and come back over.
 uint32_t mc_ack_timeout_ms(const node_t* peer, bool direct);
+
+// Configuration pushed in from the settings screen.
+void mc_set_repeater(bool on);
+void mc_set_location(bool has, int32_t latitude, int32_t longitude);
+
+// Collect a heard packet that is due to be put back on the air. Returns false
+// when nothing is ready -- repeats are deliberately held for a random moment so
+// that every repeater in earshot does not transmit at once.
+bool mc_take_due_repeat(uint8_t* out, size_t out_max, uint8_t* out_len);

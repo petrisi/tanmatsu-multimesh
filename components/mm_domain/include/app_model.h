@@ -284,6 +284,7 @@ typedef enum {
     OVERLAY_NODES,
     OVERLAY_NODE_DETAIL,
     OVERLAY_NODE_SHORT,  // typing a short name for one node
+    OVERLAY_SETTINGS,
 } overlay_t;
 
 // What a pending confirmation will do if accepted.
@@ -354,6 +355,56 @@ typedef enum {
     RADIO_ERROR,
 } radio_state_t;
 
+// What Meshtastic advertises us as. CLIENT_MUTE is the default because it is
+// the truthful one: it says we do not relay, and we do not.
+typedef enum {
+    MT_ROLE_CLIENT      = 0,  // the protobuf default
+    MT_ROLE_CLIENT_MUTE = 1,
+} mt_role_t;
+
+#define SET_HOPS_MAX_STORED  5  // what may be made permanent
+#define SET_HOPS_MAX_SESSION 7  // what the wire allows, reachable per session
+#define SET_DISPLAY_OFF_DEFAULT 5
+
+// Configuration, as distinct from the channels and identity that have their own
+// screens. Persisted whole; an unrecognised version is discarded rather than
+// reinterpreted, like every other stored record here.
+typedef struct {
+    // Optional, and consequential: once set this goes out in every MeshCore
+    // advert, so it is published to everyone in range and everyone they relay
+    // to. Stored in units of 1e-6 degrees, which is what the wire carries.
+    bool    has_location;
+    int32_t latitude;
+    int32_t longitude;
+
+    uint8_t display_off_minutes;  // 0 = never
+
+    // The value the active hop limit is reset to at every start. The active one
+    // can be pushed past this for a session, but not made to stick.
+    uint8_t mt_default_hops;
+    uint8_t mt_role;  // mt_role_t
+
+    bool mc_repeater;
+} settings_t;
+
+// The fields the configuration screen offers. Which are visible depends on the
+// active network, so the order is resolved at draw time rather than fixed here.
+typedef enum {
+    SET_FIELD_LATITUDE = 0,
+    SET_FIELD_LONGITUDE,
+    SET_FIELD_DISPLAY_OFF,
+    SET_FIELD_MT_HOPS,
+    SET_FIELD_MT_ROLE,
+    SET_FIELD_MC_REPEATER,
+    SET_FIELD_COUNT,
+} setting_field_t;
+
+#define SET_COORD_MAX 12  // "-179.123456"
+
+// Fill `out` with the visible fields in order and return how many. Shared ones
+// first, then whichever network's own settings apply.
+int settings_visible_fields(mesh_id_t active, setting_field_t* out, int max);
+
 typedef struct {
     mesh_state_t mesh[MESH_COUNT];
     mesh_id_t    active;
@@ -375,6 +426,19 @@ typedef struct {
     identity_t identity;
     char       confirm_text[80];
     confirm_action_t confirm_action;
+
+    settings_t settings;
+
+    // The hop limit actually in use. Reset to settings.mt_default_hops at every
+    // start, and pushable to SET_HOPS_MAX_SESSION for this run only -- a limit
+    // worth raising for one conversation is not one worth making permanent.
+    uint8_t mt_active_hops;
+
+    // Configuration screen: which row, and the coordinates as typed. Text
+    // rather than numbers while editing, because half a number is not a number.
+    int  setting_index;
+    char lat_text[SET_COORD_MAX + 1];
+    char lon_text[SET_COORD_MAX + 1];
 
     // Nodes view. -1 on the "this radio" row that is pinned above the list.
     int      node_index;

@@ -52,6 +52,7 @@ typedef struct __attribute__((packed)) {
 } stored_prefs_t;
 
 static bool available = false;
+static void load_config(app_model_t* model);
 
 bool settings_init(void) {
     nvs_handle_t handle;
@@ -170,6 +171,8 @@ bool settings_load(app_model_t* model) {
         any = true;
     }
 
+    load_config(model);
+
     stored_prefs_t prefs;
     if (read_blob(KEY_PREFS, &prefs, sizeof(prefs)) && prefs.version == STORED_VERSION) {
         if (prefs.active < MESH_COUNT) model->active = (mesh_id_t)prefs.active;
@@ -214,6 +217,59 @@ void settings_apply_default_channels(app_model_t* model) {
         add_default(mt, "EdgeFastLow", "EFL", "AQ==", ch_palette[2]);
         mt->input_channel = 0;
     }
+}
+
+#define KEY_CONFIG "cfg"
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t has_location;
+    int32_t latitude;
+    int32_t longitude;
+    uint8_t display_off_minutes;
+    uint8_t mt_default_hops;
+    uint8_t mt_role;
+    uint8_t mc_repeater;
+} stored_config_t;
+
+void settings_save_config(const app_model_t* model) {
+    const settings_t* s      = &model->settings;
+    stored_config_t   stored = {
+          .version             = STORED_VERSION,
+          .has_location        = s->has_location ? 1 : 0,
+          .latitude            = s->latitude,
+          .longitude           = s->longitude,
+          .display_off_minutes = s->display_off_minutes,
+          .mt_default_hops     = s->mt_default_hops,
+          .mt_role             = s->mt_role,
+          .mc_repeater         = s->mc_repeater ? 1 : 0,
+    };
+    write_blob(KEY_CONFIG, &stored, sizeof(stored));
+}
+
+static void load_config(app_model_t* model) {
+    stored_config_t stored;
+    if (!read_blob(KEY_CONFIG, &stored, sizeof(stored))) return;
+    if (stored.version != STORED_VERSION) {
+        ESP_LOGW(TAG, "configuration record unusable -- keeping defaults");
+        return;
+    }
+
+    settings_t* s = &model->settings;
+    s->has_location = stored.has_location != 0;
+    s->latitude     = stored.latitude;
+    s->longitude    = stored.longitude;
+    s->mc_repeater  = stored.mc_repeater != 0;
+
+    s->display_off_minutes = stored.display_off_minutes;
+    // Clamped rather than trusted: a record written by a build with different
+    // limits must not put an illegal hop count on the air.
+    s->mt_default_hops = stored.mt_default_hops > SET_HOPS_MAX_STORED ? SET_HOPS_MAX_STORED : stored.mt_default_hops;
+    s->mt_role         = stored.mt_role > MT_ROLE_CLIENT_MUTE ? MT_ROLE_CLIENT_MUTE : stored.mt_role;
+
+    // The active limit always starts from the stored default; a session that
+    // raised it does not get to make that permanent by outliving the reboot.
+    model->mt_active_hops = s->mt_default_hops;
 }
 
 #define KEY_MC_SEED "mc.seed"
