@@ -24,7 +24,7 @@
 #include "freertos/task.h"
 #include "leds.h"
 #include "mesh_net.h"
-#include "meshtastic_wire.h"
+#include "mesh_verify.h"
 #include "nodestore.h"
 #include "nvs_flash.h"
 #include "radio.h"
@@ -83,6 +83,40 @@ static void tx_worker(void* arg) {
         event.kind = ok ? TX_EVENT_SENT : TX_EVENT_FAILED;
         xQueueSend(tx_events, &event, portMAX_DELAY);
     }
+}
+
+// --- signature verification ----------------------------------------------
+//
+// Checking a MeshCore advert costs about a second of arithmetic. It runs here,
+// below the transmit worker, so neither drawing nor a queued send ever waits on
+// it. Like the transmit worker it touches nothing but its own queues; the
+// verdicts are applied to the model by the event loop.
+
+static void verify_worker(void* arg) {
+    (void)arg;
+    while (1) {
+        mc_verify_run_one(1000);
+    }
+}
+
+// Apply finished verdicts. Returns true if anything changed on screen.
+static bool drain_verifications(void) {
+    bool               changed = false;
+    mc_verify_result_t result;
+
+    while (mc_verify_take_result(&result)) {
+        mesh_state_t* mesh = &model.mesh[MESH_MC];
+        for (int i = 0; i < MAX_NODES; i++) {
+            node_t* node = &mesh->nodes[i];
+            if (!node->used || memcmp(node->key, result.pub_key, NODE_KEY_LEN) != 0) continue;
+
+            node->verified = result.valid ? NODE_VERIFY_VALID : NODE_VERIFY_BAD;
+            nodestore_mark_dirty(MESH_MC);
+            changed = true;
+            break;
+        }
+    }
+    return changed;
 }
 
 // Locate a message by sequence number so a worker report can be applied to it.
@@ -742,8 +776,9 @@ static void handle_identity_key(bsp_input_navigation_key_t key) {
 
 // --- nodes ---------------------------------------------------------------
 
-// Build and queue our own announcement for the active network. Meshtastic gets
-// a NodeInfo; MeshCore needs a signed advert, which is not implemented yet.
+// Build and queue our own announcement for the active network: a NodeInfo on
+// Meshtastic, a signed advert on MeshCore. Each stack knows how to construct
+// its own; all that happens here is the queueing.
 static bool send_announcement(bool manual) {
     if (!radio_is_ready()) {
         if (manual) toast("radio unavailable");
@@ -753,8 +788,8 @@ static bool send_announcement(bool manual) {
         if (manual) toast("set a name first");
         return false;
     }
-    if (model.active != MESH_MT) {
-        if (manual) toast("MeshCore advert needs signing - not yet");
+    if (model.active == MESH_MC && !model.identity.has_keypair) {
+        if (manual) toast("no signing key - cannot advertise");
         return false;
     }
 
@@ -763,20 +798,13 @@ static bool send_announcement(bool manual) {
     const channel_t* ch = &mesh->channels[mesh->input_channel];
     if (!ch->ready) return false;
 
-    mt_user_t user = {0};
-    snprintf(user.id, sizeof(user.id), "%s", model.identity.node_id);
-    snprintf(user.long_name, sizeof(user.long_name), "%s", model.identity.name);
-    snprintf(user.short_name, sizeof(user.short_name), "%s", model.identity.short_name);
-
-    uint8_t body[MT_MAX_PAYLOAD_SIZE];
-    size_t  body_len = mt_user_encode(&user, body, sizeof(body));
-    if (body_len == 0) return false;
-
     tx_request_t request = {.mesh = model.active, .seq = UINT32_MAX};  // no message row to track
-    request.length = nets[model.active]->encode_app(mesh, (uint8_t)mesh->input_channel, &model.identity,
-                                                    MT_PORTNUM_NODEINFO, body, body_len, request.frame,
-                                                    sizeof(request.frame));
-    if (request.length == 0) return false;
+    request.length       = nets[model.active]->encode_advert(mesh, (uint8_t)mesh->input_channel, &model.identity,
+                                                             request.frame, sizeof(request.frame));
+    if (request.length == 0) {
+        if (manual) toast("could not build announcement");
+        return false;
+    }
 
     if (xQueueSend(tx_requests, &request, 0) != pdTRUE) {
         if (manual) toast("transmit queue full");
@@ -1058,8 +1086,17 @@ void app_main(void) {
     // Prove the signature code before anything relies on it. A wrong Ed25519
     // produces signatures that look fine locally and are rejected by every
     // peer, which is close to undiagnosable over the air.
+    ui_boot_line("Checking signatures...");
     if (ed25519_selftest()) {
         ESP_LOGI(TAG, "ed25519 self-test passed");
+
+        // Only now is it safe to make a key. A MeshCore identity is permanent --
+        // contacts remember the public key, not the name -- so deriving one from
+        // arithmetic we have not proved would burn it.
+        ui_boot_line("Loading identity...");
+        if (!settings_load_identity_keypair(&model.identity, ed25519_keypair)) {
+            ESP_LOGE(TAG, "no MeshCore identity; adverts disabled");
+        }
     } else {
         ESP_LOGE(TAG, "ed25519 SELF-TEST FAILED - signing disabled");
         ui_boot_line("ed25519 self-test FAILED");
@@ -1095,6 +1132,11 @@ void app_main(void) {
         next_auto_advert_ms = now_ms() + 60000;
         if (xTaskCreate(tx_worker, "mm_tx", 4096, NULL, 4, NULL) != pdPASS) {
             ESP_LOGE(TAG, "transmit worker could not be started");
+        }
+        // Lower still, and a generous stack: the big-integer arithmetic behind
+        // Ed25519 is not frugal with it.
+        if (xTaskCreate(verify_worker, "mm_verify", 8192, NULL, 3, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "verification worker could not be started");
         }
     } else {
         // Still usable: channels and identity can be configured with no radio.
@@ -1158,6 +1200,7 @@ void app_main(void) {
 
         if (radio_poll()) dirty = true;
         if (drain_tx_events()) dirty = true;
+        if (drain_verifications()) dirty = true;
         if (poll_power()) dirty = true;
         if (housekeeping()) dirty = true;
         if (tx_settle()) dirty = true;

@@ -780,7 +780,7 @@ static void draw_identity(const app_model_t* model) {
     const identity_t* id = &model->identity;
 
     float bw = 46 * CHAR_W;
-    float bh = LINE_H * (ID_FIELD_COUNT + 5) + 16;
+    float bh = LINE_H * (ID_FIELD_COUNT + 7) + 16;
     float bx, by;
     overlay_box(bw, bh, &bx, &by, model->mesh[model->active].accent, "Identity");
 
@@ -805,6 +805,24 @@ static void draw_identity(const app_model_t* model) {
     pax_draw_text(&fb, COL_FROM_ID, FONT, FONT_SIZE, bx + 14 + 9 * CHAR_W, y, id->node_id);
     y += LINE_H;
     pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, bx + 14, y, "fixed - derived from the MAC");
+    y += LINE_H;
+
+    // On MeshCore the public key *is* the node id, so this is what contacts will
+    // know us by. Only a prefix fits, which is what other clients show too.
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Key");
+    if (id->has_keypair) {
+        char hex[32];
+        snprintf(hex, sizeof(hex), "%02x%02x%02x%02x %02x%02x%02x%02x...", id->public_key[0], id->public_key[1],
+                 id->public_key[2], id->public_key[3], id->public_key[4], id->public_key[5], id->public_key[6],
+                 id->public_key[7]);
+        pax_draw_text(&fb, COL_FROM_ID, FONT, FONT_SIZE, bx + 14 + 9 * CHAR_W, y, hex);
+        y += LINE_H;
+        pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, bx + 14, y, "MeshCore identity - signs adverts");
+    } else {
+        pax_draw_text(&fb, COL_BAD, FONT, FONT_SIZE, bx + 14 + 9 * CHAR_W, y, "unavailable");
+        y += LINE_H;
+        pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, bx + 14, y, "MeshCore adverts cannot be sent");
+    }
 
     y       += LINE_H + 4;
     float hx = bx + 12;
@@ -1049,6 +1067,21 @@ static void draw_nodes(const app_model_t* model) {
         pax_draw_text(&fb, node->named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, bx + 14, label[0] ? y : y,
                       label);
 
+        // One character between name and age for the signature verdict. Only a
+        // proven name or a failed check is worth the ink; unchecked is the
+        // normal state and says nothing.
+        if (model->active == MESH_MC) {
+            const char* mark = NULL;
+            pax_col_t   col  = COL_OK;
+            if (node->verified == NODE_VERIFY_VALID) {
+                mark = "*";
+            } else if (node->verified == NODE_VERIFY_BAD) {
+                mark = "!";
+                col  = COL_BAD;
+            }
+            if (mark) pax_draw_text(&fb, col, FONT, FONT_SIZE, bx + bw - 12 - 5 * CHAR_W, y, mark);
+        }
+
         char age[8];
         format_age(age, sizeof(age), node->last_heard, now);
         pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + bw - 12 - 3 * CHAR_W, y, age);
@@ -1132,10 +1165,25 @@ static void draw_node_detail(const app_model_t* model) {
     pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, radio);
     y += LINE_H;
 
-    // MeshCore adverts are signed, but verifying needs Ed25519 which is not
-    // wired up yet. Saying so is better than implying the name is proven.
-    if (model->active == MESH_MC && node->named) {
-        pax_draw_text(&fb, COL_WARN, FONT, FONT_SIZE, bx + 14, y, "name not cryptographically verified");
+    // What the advert signature proved, if anything. Only MeshCore can answer:
+    // a Meshtastic NodeInfo is unsigned, so there is nothing to report and
+    // saying "unverified" there would imply a check that could have been made.
+    if (model->active == MESH_MC) {
+        const char* verdict = NULL;
+        pax_col_t   col     = COL_DIM;
+        switch ((node_verify_t)node->verified) {
+            case NODE_VERIFY_VALID:
+                verdict = "signature verified";
+                col     = COL_OK;
+                break;
+            case NODE_VERIFY_BAD:
+                verdict = "SIGNATURE INVALID - name not trustworthy";
+                col     = COL_BAD;
+                break;
+            case NODE_VERIFY_PENDING: verdict = "checking signature..."; break;
+            default: verdict = "signature not checked"; break;
+        }
+        pax_draw_text(&fb, col, FONT, FONT_SIZE, bx + 14, y, verdict);
         y += LINE_H;
     }
 

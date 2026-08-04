@@ -306,10 +306,21 @@ static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const iden
                         msg_seq, out, out_max);
 }
 
-static uint8_t meshtastic_encode_app(mesh_state_t* mesh, uint8_t channel, const identity_t* identity,
-                                     uint32_t portnum, const uint8_t* payload, size_t payload_len, uint8_t* out,
-                                     size_t out_max) {
-    return encode_frame(mesh, channel, identity, portnum, payload, payload_len, UINT32_MAX, out, out_max);
+// NodeInfo: how a Meshtastic node tells the mesh what to call it. Unsigned and
+// unauthenticated -- any node may claim any name -- which is why nothing here
+// records a verification verdict.
+static uint8_t meshtastic_encode_advert(mesh_state_t* mesh, uint8_t channel, const identity_t* identity,
+                                        uint8_t* out, size_t out_max) {
+    mt_user_t user = {0};
+    snprintf(user.id, sizeof(user.id), "%s", identity->node_id);
+    snprintf(user.long_name, sizeof(user.long_name), "%s", identity->name);
+    snprintf(user.short_name, sizeof(user.short_name), "%s", identity->short_name);
+
+    uint8_t body[MT_MAX_PAYLOAD_SIZE];
+    size_t  body_len = mt_user_encode(&user, body, sizeof(body));
+    if (body_len == 0) return 0;
+
+    return encode_frame(mesh, channel, identity, MT_PORTNUM_NODEINFO, body, body_len, UINT32_MAX, out, out_max);
 }
 
 static const char* meshtastic_local_sender(const identity_t* identity) {
@@ -328,5 +339,5 @@ const mesh_net_t mesh_net_meshtastic = {
     .local_sender    = meshtastic_local_sender,
     .handle          = meshtastic_handle,
     .encode          = meshtastic_encode,
-    .encode_app      = meshtastic_encode_app,
+    .encode_advert   = meshtastic_encode_advert,
 };

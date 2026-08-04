@@ -117,6 +117,10 @@ bool mc_advert_parse(const uint8_t* payload, uint8_t size, mc_advert_t* out) {
     memset(out, 0, sizeof(*out));
     if (size < ADVERT_FIXED_LEN) return false;
 
+    // Ignore app data past the cap, exactly as upstream does before it verifies.
+    // Reading further would mean parsing bytes the signature does not cover.
+    if (size - ADVERT_FIXED_LEN > MC_ADVERT_APP_DATA_MAX) size = ADVERT_FIXED_LEN + MC_ADVERT_APP_DATA_MAX;
+
     uint8_t pos = 0;
     memcpy(out->pub_key, &payload[pos], MC_PUB_KEY_SIZE);
     pos += MC_PUB_KEY_SIZE;
@@ -161,15 +165,37 @@ bool mc_advert_parse(const uint8_t* payload, uint8_t size, mc_advert_t* out) {
     return true;
 }
 
-uint8_t mc_advert_signed_bytes(const mc_advert_t* advert, uint8_t* out, size_t out_max) {
+uint8_t mc_advert_signed_region(const uint8_t* payload, uint8_t size, uint8_t* out, size_t out_max) {
+    if (payload == NULL || out == NULL) return 0;
+    if (size < ADVERT_FIXED_LEN) return 0;
+
+    // Public key and timestamp, then everything after the signature -- capped
+    // where upstream caps it, or we would verify over bytes the sender's peers
+    // discard and disagree with all of them.
+    size_t head = MC_PUB_KEY_SIZE + 4;
+    size_t tail = (size_t)size - ADVERT_FIXED_LEN;
+    if (tail > MC_ADVERT_APP_DATA_MAX) tail = MC_ADVERT_APP_DATA_MAX;
+    if (head + tail > out_max) return 0;
+
+    memcpy(out, payload, head);
+    if (tail) memcpy(out + head, payload + ADVERT_FIXED_LEN, tail);
+    return (uint8_t)(head + tail);
+}
+
+uint8_t mc_advert_build(const mc_advert_t* advert, uint8_t* out, size_t out_max) {
     if (advert == NULL || out == NULL) return 0;
 
-    // Public key and timestamp, then the app data -- the signature covers
-    // everything except itself.
-    size_t need = MC_PUB_KEY_SIZE + 4 + 1;
-    if (advert->has_position) need += 8;
-    if (advert->has_name) need += strlen(advert->name);
-    if (need > out_max || need > 255) return 0;
+    // Everything after the signature is "app data", and receivers clamp it to
+    // MC_ADVERT_APP_DATA_MAX before checking the signature. Exceed that and the
+    // signature covers bytes the far end has thrown away, so it always fails.
+    size_t app_data = 1;  // the flag byte
+    if (advert->has_position) app_data += 8;
+    size_t name_len = advert->has_name ? strlen(advert->name) : 0;
+    if (app_data + name_len > MC_ADVERT_APP_DATA_MAX) return 0;
+    app_data += name_len;
+
+    size_t need = ADVERT_FIXED_LEN + app_data;
+    if (need > out_max || need > MC_MAX_PAYLOAD_SIZE) return 0;
 
     uint8_t pos = 0;
     memcpy(&out[pos], advert->pub_key, MC_PUB_KEY_SIZE);
@@ -177,9 +203,13 @@ uint8_t mc_advert_signed_bytes(const mc_advert_t* advert, uint8_t* out, size_t o
     memcpy(&out[pos], &advert->timestamp, 4);
     pos += 4;
 
+    // Left zeroed; the caller signs and patches it in.
+    memset(&out[pos], 0, MC_SIGNATURE_SIZE);
+    pos += MC_SIGNATURE_SIZE;
+
     uint8_t flags = (uint8_t)(advert->role & 0x0F);
     if (advert->has_position) flags |= ADVERT_FLAG_POSITION;
-    if (advert->has_name) flags |= ADVERT_FLAG_NAME;
+    if (name_len) flags |= ADVERT_FLAG_NAME;
     out[pos++] = flags;
 
     if (advert->has_position) {
@@ -188,8 +218,7 @@ uint8_t mc_advert_signed_bytes(const mc_advert_t* advert, uint8_t* out, size_t o
         memcpy(&out[pos], &advert->longitude, 4);
         pos += 4;
     }
-    if (advert->has_name) {
-        size_t name_len = strlen(advert->name);
+    if (name_len) {
         memcpy(&out[pos], advert->name, name_len);
         pos += (uint8_t)name_len;
     }

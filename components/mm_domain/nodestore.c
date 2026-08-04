@@ -18,8 +18,9 @@ static const char TAG[] = "nodestore";
 
 // Bump when the record layout changes; an unrecognised file is discarded rather
 // than reinterpreted.
+// v2 added the MeshCore signature verdict to node_t.
 #define NODEFILE_MAGIC   0x4D4D4E44u  // "MMND"
-#define NODEFILE_VERSION 1
+#define NODEFILE_VERSION 2
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -90,6 +91,13 @@ static void load_one(app_model_t* model, mesh_id_t id) {
     fclose(file);
 
     mesh->node_count = (int)read;
+
+    // A verdict that was still queued when we powered off is not a verdict. Drop
+    // it back to unknown so the next advert re-runs the check.
+    for (int i = 0; i < mesh->node_count; i++) {
+        if (mesh->nodes[i].verified == NODE_VERIFY_PENDING) mesh->nodes[i].verified = NODE_VERIFY_UNKNOWN;
+    }
+
     ESP_LOGI(TAG, "%s: %u nodes", model->mesh[id].name, (unsigned)read);
 }
 

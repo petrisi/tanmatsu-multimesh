@@ -43,3 +43,16 @@ void settings_apply_default_channels(app_model_t* model);
 // "!aabbccdd". Stable for the life of the device, which is what lets other
 // clients attach a name to us later.
 void settings_derive_node_id(identity_t* identity);
+
+// Load the MeshCore identity seed, generating and storing one on first run.
+// Only the 32-byte seed is persisted; the key pair is derived from it at every
+// boot, so there is one thing to keep secret rather than three.
+//
+// The seed is stored in the clear, like the channel keys and for the same
+// reason: on a device that ships with secure boot permanently disabled, anyone
+// holding the hardware can read it whatever we do.
+//
+// `derive` performs the actual Ed25519 derivation. It is passed in so this
+// component keeps no dependency on the crypto, which lives above it.
+bool settings_load_identity_keypair(identity_t* identity,
+                                    bool (*derive)(uint8_t pub[32], uint8_t priv[64], const uint8_t seed[32]));

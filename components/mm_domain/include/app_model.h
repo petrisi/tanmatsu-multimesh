@@ -126,6 +126,19 @@ typedef struct {
 #define MAX_NODES      48
 #define NODE_KEY_LEN   32
 
+// Whether the name attached to a node is actually proven to belong to it.
+//
+// Only MeshCore answers this: its adverts are Ed25519-signed by the key that is
+// the node's identity, so a good signature means the name really came from the
+// holder of that key. Meshtastic NodeInfo is unsigned -- any node can claim any
+// name -- so Meshtastic entries stay UNKNOWN and the UI says nothing.
+typedef enum {
+    NODE_VERIFY_UNKNOWN = 0,  // nothing checked, or nothing checkable
+    NODE_VERIFY_PENDING,      // queued; the check takes about a second
+    NODE_VERIFY_VALID,
+    NODE_VERIFY_BAD,  // the signature did not match: someone is spoofing
+} node_verify_t;
+
 // One heard node, on either network. The two disagree about what identifies a
 // node -- Meshtastic uses a 32-bit number, MeshCore uses the public key itself
 // -- so both fields exist and each network fills the one it uses.
@@ -133,6 +146,7 @@ typedef struct {
     bool     used;
     uint32_t last_heard;  // our clock, never the sender's
     bool     named;       // a NodeInfo or a named advert has been seen
+    uint8_t  verified;    // node_verify_t
 
     uint32_t node_num;                      // Meshtastic
     char     short_name[NODE_SHORT_MAX + 1];  // Meshtastic
@@ -226,6 +240,13 @@ typedef struct {
     char     node_id[12];  // "!aabbccdd", derived from the MAC, never edited
     uint32_t node_num;     // the same value the wire carries
     int      field;
+
+    // The MeshCore identity. On that network the public key *is* the node id,
+    // so this is what other nodes will know us by -- generated once and then
+    // never changed, or every contact stops recognising us.
+    uint8_t public_key[32];
+    uint8_t private_key[64];  // derived from the stored seed, never persisted
+    bool    has_keypair;
 } identity_t;
 
 // Transmitting without an identity would put an anonymous message on a public

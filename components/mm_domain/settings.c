@@ -5,6 +5,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_random.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -213,6 +214,29 @@ void settings_apply_default_channels(app_model_t* model) {
         add_default(mt, "EdgeFastLow", "EFL", "AQ==", ch_palette[2]);
         mt->input_channel = 0;
     }
+}
+
+#define KEY_MC_SEED "mc.seed"
+
+bool settings_load_identity_keypair(identity_t* identity,
+                                    bool (*derive)(uint8_t pub[32], uint8_t priv[64], const uint8_t seed[32])) {
+    if (identity == NULL || derive == NULL) return false;
+
+    uint8_t seed[32];
+    if (!read_blob(KEY_MC_SEED, seed, sizeof(seed))) {
+        // First run. A fresh identity means every MeshCore node sees a new
+        // contact, which is why this is generated once and then left alone.
+        esp_fill_random(seed, sizeof(seed));
+        write_blob(KEY_MC_SEED, seed, sizeof(seed));
+        ESP_LOGI(TAG, "generated a new MeshCore identity");
+    }
+
+    identity->has_keypair = derive(identity->public_key, identity->private_key, seed);
+    if (!identity->has_keypair) ESP_LOGE(TAG, "key derivation failed; MeshCore adverts unavailable");
+
+    // The seed is the secret; do not leave a copy on the stack.
+    memset(seed, 0, sizeof(seed));
+    return identity->has_keypair;
 }
 
 void settings_derive_node_id(identity_t* identity) {

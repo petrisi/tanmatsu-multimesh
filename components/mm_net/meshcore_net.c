@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: MIT
 //
-// MeshCore stack adapter: channel receive.
+// MeshCore stack adapter: channel receive and transmit, plus adverts.
 
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include "base64.h"
 #include "dedup.h"
+#include "ed25519.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "mesh_net.h"
+#include "mesh_verify.h"
 #include "meshcore_crypto.h"
 #include "meshcore_wire.h"
 #include "radio_cfg.h"
@@ -78,8 +82,78 @@ static bool credit_repeat(mesh_state_t* mesh, const uint8_t* payload, uint8_t pa
     return false;
 }
 
+// --- advert signature verification ---------------------------------------
+//
+// See mesh_verify.h for why this is not done inline.
+
+#define VERIFY_QUEUE_DEPTH 4
+
+typedef struct {
+    uint8_t pub_key[MC_PUB_KEY_SIZE];
+    uint8_t signature[MC_SIGNATURE_SIZE];
+    uint8_t signed_len;
+    uint8_t signed_bytes[MC_MAX_PAYLOAD_SIZE];
+} verify_job_t;
+
+static QueueHandle_t verify_jobs;
+static QueueHandle_t verify_results;
+
+// Queue an advert for checking. False when it was dropped -- a full queue means
+// adverts are arriving faster than we can verify them, and receive must not
+// block for a verdict. The caller leaves the node unchecked so the next advert
+// from it tries again.
+static bool queue_verification(const uint8_t* payload, uint8_t payload_len, const mc_advert_t* advert) {
+    if (verify_jobs == NULL) return false;
+
+    verify_job_t job;
+    job.signed_len = mc_advert_signed_region(payload, payload_len, job.signed_bytes, sizeof(job.signed_bytes));
+    if (job.signed_len == 0) return false;
+
+    memcpy(job.pub_key, advert->pub_key, sizeof(job.pub_key));
+    memcpy(job.signature, advert->signature, sizeof(job.signature));
+
+    if (xQueueSend(verify_jobs, &job, 0) != pdTRUE) {
+        ESP_LOGD(TAG, "verification backlog, advert unchecked");
+        return false;
+    }
+    return true;
+}
+
+bool mc_verify_run_one(uint32_t wait_ms) {
+    if (verify_jobs == NULL || verify_results == NULL) return false;
+
+    verify_job_t job;
+    if (xQueueReceive(verify_jobs, &job, pdMS_TO_TICKS(wait_ms)) != pdTRUE) return false;
+
+    mc_verify_result_t result;
+    memcpy(result.pub_key, job.pub_key, sizeof(result.pub_key));
+    result.valid = ed25519_verify(job.signature, job.signed_bytes, job.signed_len, job.pub_key);
+
+    if (!result.valid) {
+        ESP_LOGW(TAG, "advert signature failed for %02x%02x%02x%02x", job.pub_key[0], job.pub_key[1], job.pub_key[2],
+                 job.pub_key[3]);
+    }
+
+    xQueueSend(verify_results, &result, portMAX_DELAY);
+    return true;
+}
+
+bool mc_verify_take_result(mc_verify_result_t* out) {
+    if (verify_results == NULL || out == NULL) return false;
+    return xQueueReceive(verify_results, out, 0) == pdTRUE;
+}
+
 static bool meshcore_init(void) {
     dedup_reset(&seen);
+    memset(pending, 0, sizeof(pending));
+
+    if (verify_jobs == NULL) verify_jobs = xQueueCreate(VERIFY_QUEUE_DEPTH, sizeof(verify_job_t));
+    if (verify_results == NULL) verify_results = xQueueCreate(VERIFY_QUEUE_DEPTH, sizeof(mc_verify_result_t));
+    if (verify_jobs == NULL || verify_results == NULL) {
+        ESP_LOGE(TAG, "verification queues could not be allocated");
+        return false;
+    }
+
     return mc_crypto_init();
 }
 
@@ -169,6 +243,18 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
                     snprintf(node->long_name, sizeof(node->long_name), "%s", advert.name);
                     node->named = true;
                 }
+
+                // Check the signature once per node. Re-checking every advert
+                // would keep a slow crypto task permanently busy for no gain:
+                // the key is the identity, so a key that has signed correctly
+                // once cannot later turn out to be someone else. A previous
+                // failure is retried, since it may have been a corrupt frame.
+                if (node->verified != NODE_VERIFY_VALID && node->verified != NODE_VERIFY_PENDING) {
+                    if (queue_verification(packet.payload, packet.payload_length, &advert)) {
+                        node->verified = NODE_VERIFY_PENDING;
+                    }
+                }
+
                 ESP_LOGI(TAG, "advert %s (%s)", advert.has_name ? advert.name : "unnamed",
                          mc_role_name(advert.role));
             }
@@ -265,6 +351,52 @@ static uint8_t meshcore_encode(mesh_state_t* mesh, uint8_t channel, const identi
     return len;
 }
 
+// An advert is the whole of MeshCore's identity system: it binds a name and a
+// role to a public key, and the signature is what makes that binding worth
+// anything. It is not scoped to a channel -- everyone on the frequency can read
+// it, whatever keys they hold -- so `channel` is unused here.
+static uint8_t meshcore_encode_advert(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, uint8_t* out,
+                                      size_t out_max) {
+    (void)mesh;
+    (void)channel;
+    if (!identity->has_keypair) return 0;
+
+    mc_advert_t advert = {0};
+    memcpy(advert.pub_key, identity->public_key, MC_PUB_KEY_SIZE);
+    advert.timestamp = (uint32_t)time(NULL);
+    advert.role      = MC_ROLE_CHAT_NODE;
+    if (identity->name[0]) {
+        snprintf(advert.name, sizeof(advert.name), "%s", identity->name);
+        advert.has_name = true;
+    }
+
+    uint8_t payload[MC_MAX_PAYLOAD_SIZE];
+    uint8_t payload_len = mc_advert_build(&advert, payload, sizeof(payload));
+    if (payload_len == 0) return 0;
+
+    // Sign exactly the bytes a receiver will reconstruct: taken back off the
+    // serialised payload rather than assembled a second time, so the two can
+    // never disagree.
+    uint8_t region[MC_MAX_PAYLOAD_SIZE];
+    uint8_t region_len = mc_advert_signed_region(payload, payload_len, region, sizeof(region));
+    if (region_len == 0) return 0;
+
+    uint8_t signature[MC_SIGNATURE_SIZE];
+    if (!ed25519_sign(signature, region, region_len, identity->public_key, identity->private_key)) {
+        ESP_LOGE(TAG, "advert signing failed");
+        return 0;
+    }
+    memcpy(&payload[MC_ADVERT_SIGNATURE_OFFSET], signature, sizeof(signature));
+
+    uint8_t len = mc_packet_build(MC_PAYLOAD_ADVERT, MC_ROUTE_FLOOD, payload, payload_len, out, out_max);
+    if (len == 0) return 0;
+
+    // Repeaters will flood this back at us. Remember it so our own advert is not
+    // decoded as a stranger's and entered in the node list as a second self.
+    track_transmission(payload, payload_len, UINT32_MAX);
+    return len;
+}
+
 static const char* meshcore_local_sender(const identity_t* identity) {
     // The name we actually put in the message text, so the echo matches what
     // everyone else will see.
@@ -280,4 +412,5 @@ const mesh_net_t mesh_net_meshcore = {
     .local_sender    = meshcore_local_sender,
     .handle          = meshcore_handle,
     .encode          = meshcore_encode,
+    .encode_advert   = meshcore_encode_advert,
 };

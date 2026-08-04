@@ -87,6 +87,12 @@ uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, const uin
 #define MC_SIGNATURE_SIZE 64
 #define MC_NAME_MAX       32
 
+// Everything after the signature -- flags, optional position, name -- is one
+// blob that upstream calls the app data, and it clamps that blob to this before
+// verifying. Anything longer is simply not covered by the signature the far end
+// checks, so building one is a silent way to be rejected by every peer.
+#define MC_ADVERT_APP_DATA_MAX 32
+
 typedef enum {
     MC_ROLE_UNKNOWN     = 0,
     MC_ROLE_CHAT_NODE   = 1,
@@ -109,10 +115,22 @@ typedef struct {
 
 bool mc_advert_parse(const uint8_t* payload, uint8_t size, mc_advert_t* out);
 
-// The bytes an advert signature covers: everything from the public key onward,
-// with the signature itself omitted. Needed both to verify one and to sign ours.
-// Returns the length written, or 0 if it will not fit.
-uint8_t mc_advert_signed_bytes(const mc_advert_t* advert, uint8_t* out, size_t out_max);
+// The bytes an advert signature covers, taken from the raw payload: everything
+// except the 64-byte signature itself.
+//
+// Deliberately works on raw bytes rather than the parsed struct. Re-serialising
+// from mc_advert_t would silently drop any optional field this parser does not
+// understand, and the signature would then fail against a sender that includes
+// one -- a bug that would look like bad crypto rather than a lossy round trip.
+//
+// Returns the length written, or 0 if the payload is too short or will not fit.
+uint8_t mc_advert_signed_region(const uint8_t* payload, uint8_t size, uint8_t* out, size_t out_max);
+
+// Serialise an advert with its signature field left zeroed. Sign the region
+// reported by mc_advert_signed_region() over the result, then write the 64-byte
+// signature at MC_ADVERT_SIGNATURE_OFFSET.
+#define MC_ADVERT_SIGNATURE_OFFSET (MC_PUB_KEY_SIZE + 4)
+uint8_t mc_advert_build(const mc_advert_t* advert, uint8_t* out, size_t out_max);
 
 const char* mc_role_name(mc_role_t role);
 
