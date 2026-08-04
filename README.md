@@ -51,8 +51,10 @@ sides of every feature listed above.
 > cycle in the EU and nothing in this app enforces it. Treat this as lab and
 > experimental use until it does.
 
-Also not implemented: message history persistence, and position and telemetry
-reporting.
+Also not implemented: message history persistence, position and telemetry
+reporting, replies and reactions, and traceroute. See
+[docs/roadmap.md](docs/roadmap.md) for the full list and the reasoning behind
+each.
 
 ## Hardware
 
@@ -191,6 +193,7 @@ returns it to the stored value.
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | component layout, threading, and the platform behaviour worth knowing before touching this code |
 | [docs/protocol.md](docs/protocol.md) | radio settings, channels, identity, direct messages, routing, storage |
+| [docs/roadmap.md](docs/roadmap.md) | what is not built yet, and why it matters |
 | [docs/second-radio-investigation.md](docs/second-radio-investigation.md) | what running both networks simultaneously would take, and why the antennas make it harder than it looks |
 
 ## Contributing
