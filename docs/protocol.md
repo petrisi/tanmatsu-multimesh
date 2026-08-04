@@ -24,7 +24,7 @@ preset is configured on the device. Falls back to EU/UK narrow:
 869.618 MHz  SF8  BW 62.5 kHz  CR 4/8  22 dBm  preamble 8  sync 0x12  rx_boost on
 ```
 
-**Meshtastic** uses the Finnish EdgeFastLow (EFL) profile:
+**Meshtastic** uses the EdgeFastLow (EFL) profile that is compatible with NarrowSlow-preset (at some level):
 
 ```
 channel "EdgeFastLow", PSK "AQ==" (= {0x01}, the default key)
