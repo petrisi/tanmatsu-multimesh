@@ -567,14 +567,23 @@ static void draw_status(const app_model_t* model) {
     // for. Dim while idle, bright for a moment each time a packet is relayed,
     // and carrying the count -- which is the part worth having, since repeating
     // for nobody looks exactly like repeating for everybody.
+    //
+    // On its own dark chip, for the same reason the target chip has one: the
+    // idle grey and the Meshtastic accent are near enough the same brightness
+    // that the badge vanished into the bar. A chip fixes it on both networks
+    // and keeps the two looking alike, where tuning the grey per accent would
+    // only have moved the problem to the next accent colour.
     bool relaying = model->active == MESH_MC ? model->settings.mc_repeater
                                              : model->settings.mt_role == MT_ROLE_CLIENT;
     if (relaying) {
         uint32_t count = model->repeat_count[model->active];
         char     badge[12];
         snprintf(badge, sizeof(badge), "RPT %lu", (unsigned long)(count > 999 ? 999 : count));
-        x -= 6 + (float)strlen(badge) * CHAR_W;
-        pax_draw_text(&fb, model->repeat_busy ? COL_OK : COL_DIM, FONT, FONT_SIZE, x, 4, badge);
+
+        float badge_w = (float)strlen(badge) * CHAR_W + 12;
+        x            -= 6 + badge_w;
+        pax_draw_round_rect(&fb, COL_CHIP, x, 3, badge_w, STATUS_H - 6, 4);
+        pax_draw_text(&fb, model->repeat_busy ? COL_OK : COL_DIM, FONT, FONT_SIZE, x + 6, 4, badge);
     }
 
     x -= 6 + 3 * CHAR_W;
