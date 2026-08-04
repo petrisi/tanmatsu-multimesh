@@ -4,13 +4,13 @@
   "categories": ["Communication"],
   "author": "Petri Simolin",
   "license_type": "MIT",
-  "version": 32,
+  "version": 33,
   "icon": { "32x32": "icon32.png" },
   "application": [
     {
       "targets": ["Tanmatsu"],
       "type": "appfs",
-      "revision": 32,
+      "revision": 33,
       "executable": "fi.ps.multimesh"
     }
   ]

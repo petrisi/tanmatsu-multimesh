@@ -577,7 +577,15 @@ static void composer_send(void) {
     }
     if (request.length == 0) {
         msg->tx = TX_FAILED;
-        toast("could not encode message");
+        // Say which precondition failed. "Could not encode" on its own gives the
+        // user nothing and leaves a reader guessing between a channel with no
+        // usable key, a contact with no shared secret, and a message too long
+        // for the frame -- which have nothing in common but the message.
+        const channel_t* ch = mesh->input_channel < mesh->channel_count ? &mesh->channels[mesh->input_channel] : NULL;
+        session_log("tx.fail net=%s dm=%u chan=%d ready=%u keylen=%u bytes=%d",
+                    model.active == MESH_MC ? "mc" : "mt", peer ? 1u : 0u, mesh->input_channel,
+                    ch && ch->ready ? 1u : 0u, ch ? (unsigned)ch->key_len : 0u, model.composer_len);
+        toast(ch && !ch->ready ? "channel key unusable" : "could not encode message");
         return;
     }
 
@@ -1306,7 +1314,13 @@ static bool text_to_coord(const char* text, int32_t* out, int32_t limit) {
 // Coordinates are typed, so they are held as text while the screen is open and
 // only become numbers on save: half a number is not a number, and rejecting it
 // keystroke by keystroke would make it impossible to type a minus sign.
+// What the settings were when the screen opened, so cancelling restores exactly
+// those and touches nothing else.
+static settings_t settings_backup;
+
 static void settings_open(void) {
+    settings_backup = model.settings;
+
     if (model.settings.has_location) {
         char buf[SET_COORD_MAX + 1];
         coord_to_text(buf, sizeof(buf), model.settings.latitude);
@@ -1414,8 +1428,15 @@ static void handle_settings_key(bsp_input_navigation_key_t key) {
             break;
         case BSP_INPUT_NAVIGATION_KEY_ESC:
         case BSP_INPUT_NAVIGATION_KEY_F1:
-            // Reload, so a cancelled edit leaves nothing behind.
-            settings_load(&model);
+            // Put back the snapshot taken when the screen opened.
+            //
+            // Not a settings_load(): that re-reads the channels too, and loading
+            // a channel rebuilds it from the stored name and secret alone --
+            // wiping the key, hash and ready flag that the network stack derives
+            // once at startup. Cancelling out of here left every channel
+            // unusable until the next reboot, on both networks.
+            model.settings = settings_backup;
+            apply_settings();
             model.overlay = OVERLAY_NONE;
             break;
         default: break;
