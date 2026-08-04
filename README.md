@@ -7,27 +7,7 @@ handheld — MeshCore and Meshtastic in one app, switched with a single keypress
 [![Platform: ESP32-P4](https://img.shields.io/badge/platform-ESP32--P4-informational.svg)](#hardware)
 [![ESP-IDF v6.0.2](https://img.shields.io/badge/ESP--IDF-v6.0.2-red.svg)](https://docs.espressif.com/projects/esp-idf/)
 
-```
-          ((  o  ))
-       ((     |     ))
-    ((        |        ))
-             /|\
-            / | \
-      _____/__|__\_____
-
-#   # #   # #     ##### #####
-## ## #   # #       #     #
-# # # #   # #       #     #
-#   # #   # #       #     #
-#   #  ###  #####   #   #####
-   #   # #####  #### #   #
-   ## ## #     #     #   #
-   # # # ####   ###  #####
-   #   # #         # #   #
-   #   # ##### ####  #   #
-
-   MeshCore  +  Meshtastic
-```
+<img width="1252" height="1663" alt="image" src="https://github.com/user-attachments/assets/7438b4d9-3da7-41f9-be3d-02092a70fa37" />
 
 Both protocol stacks are implemented from the wire up in application code on the
 ESP32-P4, so the C6 radio coprocessor keeps its stock firmware and changing
