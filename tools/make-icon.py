@@ -12,7 +12,10 @@
 import math, struct, zlib, sys, os
 
 S = 32
-BG = (0, 0, 0, 0)
+# Opaque, and the same near-black the application itself runs on. Transparent
+# would leave the mark to sit on whatever the launcher happens to draw behind
+# it, which is neither dark nor predictable.
+BG = (0x0E, 0x0E, 0x14, 255)
 MC = (0x4F, 0xA8, 0xFF, 255)   # MeshCore blue
 MT = (0x5F, 0xD0, 0x7A, 255)   # Meshtastic green
 FG = (0xE8, 0xE8, 0xE8, 255)   # mast and emitter
@@ -77,5 +80,4 @@ if __name__ == "__main__":
     png(out)
     print(f"wrote {out} ({os.path.getsize(out)} bytes)")
     for y in range(S):
-        print("".join("." if px[y][x][3] == 0 else ("B" if px[y][x] == MC else "G" if px[y][x] == MT else "#")
-                      for x in range(S)))
+        print("".join("." if px[y][x] == BG else ("B" if px[y][x] == MC else "G" if px[y][x] == MT else "#") for x in range(S)))
