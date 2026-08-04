@@ -170,6 +170,39 @@ Entries expire on last-heard: **7 days** for a node that never told us its name,
 **30 days** for one that did. An unnamed entry is little more than evidence that
 something transmitted once; a named one is a contact.
 
+Per-node actions from the detail view: **△** message, **◯** set a short name,
+**■** remove, **☁** forget the route (MeshCore), **◇** exchange info (Meshtastic).
+
+## Direct messages
+
+Both networks encrypt a conversation to the other party, so **neither can carry
+one without a key**. The picker marks each contact `e2e`, `...` while the key is
+being derived, or `no key`.
+
+**MeshCore** agrees a key from the Ed25519 identity in a node's advert, so a
+contact becomes messageable as soon as it has been heard. Delivery is
+acknowledged properly: the reply is a hash of the plaintext and the sender's key,
+which proves the recipient decrypted the message rather than merely heard the
+frame.
+
+**Meshtastic** has no such shortcut and no channel-key fallback, because current
+firmware removed both halves of one: `perhapsEncode` refuses to send a keyless
+direct message (`PKI_SEND_FAIL_PUBLIC_KEY`, *"refusing to send legacy DM"*) and
+`perhapsDecode` discards one that arrives — it decrypts it, parses it, recognises
+it as a direct message and drops it with *"Rejecting legacy DM"*. A fallback
+would produce a message that looked sent, reached nobody, and could not even be
+acknowledged, since the acknowledgement is generated after a successful decode.
+
+So a Meshtastic contact must publish a key first. **◇ in the node detail
+exchanges it** — our NodeInfo addressed to them with `want_response`, which is
+what the official app calls "exchange user info". NodeInfo is deliberately exempt
+from both rules above, which is exactly what lets it travel before any key
+exists. Incoming requests are answered the same way, at most once a day per
+asker; asking more often than that resets the window rather than shortening it.
+
+Meshtastic acknowledges with a `ROUTING` reply naming the packet it answers, sent
+only when the sender set `want_ack`.
+
 ## Storage
 
 | What | Where | Why |
@@ -300,9 +333,9 @@ detail — as evidence, not as the ordering key.
 
 ## Not implemented yet
 
-Direct messages, message history persistence, position, telemetry, and a
-duty-cycle gate. **The last one matters:** 869.4–869.65 MHz is limited to 10%
-duty cycle and nothing here enforces it, so this is lab use until it does.
+Message history persistence, position, telemetry, and a duty-cycle gate. **The
+last one matters:** 869.4–869.65 MHz is limited to 10% duty cycle and nothing
+here enforces it, so this is lab use until it does.
 
 ## License
 

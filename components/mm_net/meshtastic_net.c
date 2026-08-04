@@ -22,6 +22,8 @@
 #include "mesh_net.h"
 #include "meshtastic_crypto.h"
 #include "meshtastic_wire.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "session_log.h"
 
 static const char TAG[] = "net_mt";
@@ -122,6 +124,66 @@ typedef struct {
 
 static pending_ack_t acks[MAX_PENDING_ACKS];
 
+// --- information request throttling --------------------------------------
+//
+// A NodeInfo request is answered once per day per asker. Upstream does the same
+// -- a shorter window there -- because the request is cheap to send and the
+// reply is not: on a busy mesh a node that asks everyone, or asks repeatedly,
+// would otherwise have the whole band answering it.
+//
+// Held in memory rather than on the node record, as upstream holds it: a reboot
+// forgetting who has been answered costs one extra reply, while putting it on
+// disk would change the stored layout and discard every node we know.
+//
+// Measured against uptime, not the clock. Upstream is explicit about why: a
+// wall-clock correction, or a replayed packet carrying a stale timestamp, would
+// otherwise move the window under us.
+#define INFO_REPLY_INTERVAL_MS (24u * 60 * 60 * 1000)
+#define INFO_REPLY_TRACKED     12
+
+typedef struct {
+    uint32_t node_num;
+    uint32_t at_ms;
+    bool     used;
+} info_request_t;
+
+static info_request_t info_requests[INFO_REPLY_TRACKED];
+
+static uint32_t uptime_ms(void) {
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+// Record a request and say whether it should be answered. Stamped on every
+// request whether or not we reply, which is upstream's behaviour and makes the
+// window slide: a node asking more often than once a day never gets an answer
+// until it pauses for one.
+static bool info_reply_due(uint32_t node_num) {
+    uint32_t now   = uptime_ms();
+    int      slot  = -1;
+    int      oldest = 0;
+
+    for (int i = 0; i < INFO_REPLY_TRACKED; i++) {
+        if (info_requests[i].used && info_requests[i].node_num == node_num) {
+            slot = i;
+            break;
+        }
+        if (!info_requests[i].used) {
+            slot = i;
+            break;
+        }
+        if (info_requests[i].at_ms < info_requests[oldest].at_ms) oldest = i;
+    }
+    if (slot < 0) slot = oldest;  // full: the least recently heard from makes way
+
+    bool known = info_requests[slot].used && info_requests[slot].node_num == node_num;
+    bool due   = !known || (now - info_requests[slot].at_ms) >= INFO_REPLY_INTERVAL_MS;
+
+    info_requests[slot].used     = true;
+    info_requests[slot].node_num = node_num;
+    info_requests[slot].at_ms    = now;
+    return due;
+}
+
 // The slots are just deferred outgoing frames: acknowledgements, and replies to
 // an information request. Anything the receive path decides to send but cannot,
 // because it runs on the loop that must not block.
@@ -169,6 +231,7 @@ static bool meshtastic_init(void) {
     dedup_reset(&seen);
     memset(pending, 0, sizeof(pending));
     memset(acks, 0, sizeof(acks));
+    memset(info_requests, 0, sizeof(info_requests));
     return true;
 }
 
@@ -308,11 +371,15 @@ static bool deliver(const mt_data_t* data, const mt_packet_t* packet, mesh_state
             // send us anything private. Only when addressed to us -- a broadcast
             // asking everyone would set the whole mesh talking at once.
             if (data->want_response && packet->to == identity->node_num) {
-                pending_ack_t* slot = free_ack_slot();
-                if (slot) {
-                    slot->length = encode_nodeinfo(mesh, identity, node, false, slot->frame, sizeof(slot->frame));
-                    slot->active = slot->length > 0;
-                    session_log("nodeinfo.tx to=%08lx reason=request", (unsigned long)packet->from);
+                if (!info_reply_due(packet->from)) {
+                    session_log("nodeinfo.hold to=%08lx reason=answered_within_24h", (unsigned long)packet->from);
+                } else {
+                    pending_ack_t* slot = free_ack_slot();
+                    if (slot) {
+                        slot->length = encode_nodeinfo(mesh, identity, node, false, slot->frame, sizeof(slot->frame));
+                        slot->active = slot->length > 0;
+                        session_log("nodeinfo.tx to=%08lx reason=request", (unsigned long)packet->from);
+                    }
                 }
             }
         }
@@ -589,6 +656,22 @@ uint8_t mt_encode_info_exchange(mesh_state_t* mesh, const identity_t* identity, 
 
 static uint8_t meshtastic_encode_dm(mesh_state_t* mesh, const identity_t* identity, const node_t* peer,
                                     const char* text, message_t* msg, uint8_t* out, size_t out_max) {
+    // No key, no message. Current firmware refuses to send a text message to a
+    // node whose public key it lacks, and refuses one that arrives encrypted
+    // under a channel key -- it decrypts it, parses it, recognises it as a
+    // direct message and discards it with "Rejecting legacy DM".
+    //
+    // So the channel fallback that used to be here did not degrade gracefully:
+    // it produced a message that looked sent, was never shown to anyone, and
+    // could not even be acknowledged, because the acknowledgement is generated
+    // after a successful decode. Refusing is the honest outcome, and the node
+    // detail offers the exchange that fixes it.
+    //
+    // The check is here rather than in encode_to_node because acknowledgements
+    // and NodeInfo still travel under the channel key by design -- NodeInfo
+    // especially, since that is what carries the key that lifts this.
+    if (!identity->has_mt_keypair || peer == NULL || !peer->has_secret) return 0;
+
     // want_ack is what asks the recipient for a routing reply. Without it a
     // Meshtastic node stays silent and there is nothing to confirm delivery
     // with, which is why our direct messages never showed as acknowledged.

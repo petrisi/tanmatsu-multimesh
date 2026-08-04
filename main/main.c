@@ -516,8 +516,18 @@ static void composer_send(void) {
             toast("that contact is gone - pick another target");
             return;
         }
-        if (!peer->has_secret && model.active == MESH_MC) {
-            toast(peer->secret_pending ? "still agreeing a key - try again shortly" : "no key for this contact yet");
+        // Both networks encrypt a conversation to the other party, so neither
+        // can carry one without a key. Refused here, before the local echo is
+        // pushed: a message shown as sent that never left is worse than a
+        // refusal, and on Meshtastic the recipient would discard it anyway.
+        if (!peer->has_secret) {
+            if (peer->secret_pending) {
+                toast("preparing key - try again shortly");
+            } else if (model.active == MESH_MT) {
+                toast("no key - exchange info first");
+            } else {
+                toast("no key for this contact yet");
+            }
             return;
         }
     }
@@ -1096,7 +1106,7 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
                 if (node->has_secret) {
                     toast("messaging %s", label);
                 } else if (model.active == MESH_MT) {
-                    toast("%s: no key, channel-encrypted only", label);
+                    toast("%s: no key - exchange info first", label);
                 } else {
                     toast("%s: agreeing a key...", label);
                 }
@@ -1218,9 +1228,8 @@ static void picker_choose(void) {
     if (node->has_secret) {
         toast("messaging %s", label);
     } else if (model.active == MESH_MT) {
-        // Worth saying out loud: the message will go out under the channel key,
-        // so everyone on the channel can read it.
-        toast("%s: no key, channel-encrypted only", label);
+        // No longer "weaker but works": without a key there is nothing to send.
+        toast("%s: no key - exchange info first", label);
     } else {
         toast("%s: agreeing a key...", label);
     }

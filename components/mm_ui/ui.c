@@ -873,19 +873,17 @@ static void draw_picker(const app_model_t* model) {
         model_node_label(node, model->active, label, sizeof(label));
         pax_draw_text(&fb, node->named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, bx + 32, y, label);
 
-        // Whether a private message to this contact would actually be private.
-        // Saying nothing here would let the user assume more than is true.
-        const char* state = "open";
-        pax_col_t   col   = COL_WARN;
+        // Whether this contact can be messaged at all, and how privately.
+        // Neither network can carry a conversation without a key, so a missing
+        // one is not a weaker option -- it is no option.
+        const char* state = "no key";
+        pax_col_t   col   = COL_BAD;
         if (node->has_secret) {
             state = "e2e";
             col   = COL_OK;
         } else if (node->secret_pending) {
             state = "...";
             col   = COL_DIM;
-        } else if (model->active == MESH_MC) {
-            state = "no key";
-            col   = COL_BAD;
         }
         pax_draw_text(&fb, col, FONT, FONT_SIZE, bx + bw - 12 - 8 * CHAR_W, y, state);
 
