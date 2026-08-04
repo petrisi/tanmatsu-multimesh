@@ -1616,9 +1616,9 @@ static void setting_row(const app_model_t* model, setting_field_t field, char* l
             snprintf(value, value_size, "%s", s->mt_role == MT_ROLE_CLIENT ? "CLIENT" : "CLIENT_MUTE");
             break;
         case SET_FIELD_MC_REPEATER:
-            snprintf(label, label_size, "Repeater");
+            snprintf(label, label_size, "Off-grid repeat");
             snprintf(value, value_size, "%s", s->mc_repeater ? "on" : "off");
-            *col = s->mc_repeater ? COL_WARN : COL_DIM;
+            *col = s->mc_repeater ? COL_OK : COL_DIM;
             break;
         default: break;
     }
@@ -1674,7 +1674,7 @@ static void draw_settings(const app_model_t* model) {
         case SET_FIELD_DISPLAY_OFF: note = "backlight only - radio keeps running"; break;
         case SET_FIELD_MT_HOPS: note = "resets here at start; fn+0..7 for now"; break;
         case SET_FIELD_MT_ROLE: note = "what we tell others we do with traffic"; break;
-        case SET_FIELD_MC_REPEATER: note = "repeat everything heard - costs airtime"; break;
+        case SET_FIELD_MC_REPEATER: note = "forward others' packets to extend the mesh"; break;
         default: break;
     }
     pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, bx + 14, y, note);

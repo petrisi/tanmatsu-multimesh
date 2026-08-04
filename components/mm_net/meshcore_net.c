@@ -122,11 +122,23 @@ void mc_set_location(bool has, int32_t latitude, int32_t longitude) {
     advert_longitude    = longitude;
 }
 
-// --- repeating -----------------------------------------------------------
+// --- off-grid repeat -----------------------------------------------------
 //
-// Off by default. When on we behave as an extra repeater: everything heard that
-// is new and not addressed to us goes back out, with our own hash appended so
-// the path records that it came through here.
+// Turns this node into a temporary repeater: packets heard for other people are
+// forwarded, so a handful of ordinary clients can give each other extra hops
+// with no deployed infrastructure. That is what it is for -- a field day, a
+// search, a group on a hill, bootstrapping a mesh before anything permanent
+// exists. Clients stay quiet by default because a mesh where everyone repeats
+// everything is a mesh that spends its airtime on itself.
+//
+// One deliberate difference from the stock feature: upstream ties Off-Grid
+// Repeat to one of three preset frequencies (433.000, 869.000 or 918.000 MHz),
+// which cuts you off from a regional mesh running anywhere else while it is on.
+// Here it is simply a mode, and the configured frequency is left alone -- so
+// repeating for a group does not mean leaving the network you were on.
+//
+// Everything new that was not addressed to us goes back out, with our own hash
+// appended so the path records that it came through here.
 //
 // The delay is the whole difficulty. Every repeater in earshot hears the same
 // packet at the same instant, so retransmitting immediately means they all

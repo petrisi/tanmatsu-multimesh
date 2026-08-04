@@ -203,6 +203,30 @@ asker; asking more often than that resets the window rather than shortening it.
 Meshtastic acknowledges with a `ROUTING` reply naming the packet it answers, sent
 only when the sender set `want_ack`.
 
+## Configuration
+
+The **bottom side button** opens it. Shared settings apply to both networks; the
+rest belong to whichever network was active when the screen was opened, and it
+stays on that one while open.
+
+| | |
+|---|---|
+| Location | latitude and longitude, optional. Once set it goes out in **every MeshCore advert** — published to everyone in range and everyone they relay to. Stored as millionths of a degree, the units the wire carries. Both coordinates or neither. |
+| Screen off | minutes of no input before the backlight goes dark, 0 = never. Backlight only: the panel and the radio keep running and messages keep arriving. The key that wakes it is swallowed. |
+| Hop limit *(MT)* | 0–5. This is the value the active limit **resets to at every start** — see below. |
+| Role *(MT)* | CLIENT or CLIENT_MUTE, advertised in NodeInfo. Defaults to CLIENT_MUTE, which is the truthful one while this app does not relay Meshtastic traffic. |
+| Off-grid repeat *(MC)* | forward other nodes' packets, so a handful of ordinary clients can give each other extra hops with no deployed infrastructure — a field day, a search, bootstrapping a mesh. Off by default, because a mesh where everyone repeats everything spends its airtime on itself. |
+
+**`fn` + `0`…`7`** sets the Meshtastic hop limit for the current session only. It
+reaches 7 where the stored setting stops at 5, on the grounds that a limit worth
+raising to get one message out is not one worth making permanent. Restarting
+returns it to the stored value.
+
+Off-grid repeat differs from the stock feature in one deliberate way: upstream
+ties it to one of three preset frequencies (433.000, 869.000 or 918.000 MHz),
+which cuts you off from a regional mesh running anywhere else while it is on.
+Here it is only a mode — the configured frequency is left alone.
+
 ## Storage
 
 | What | Where | Why |
