@@ -494,7 +494,8 @@ static bool handle_path_return(const mc_packet_t* packet, mesh_state_t* mesh, co
         if (returned.extra_type == MC_PAYLOAD_ACK && returned.extra_len >= MC_ACK_HASH_SIZE) {
             credit_ack(mesh, returned.extra);
         }
-        return true;
+        // Same as an acknowledgement: a route learned is not a message to read.
+        return false;
     }
 
     // Arrived for us but matched nobody: the sender is unknown, or the one-byte
@@ -505,10 +506,17 @@ static bool handle_path_return(const mc_packet_t* packet, mesh_state_t* mesh, co
 
 // An acknowledgement for one of our direct messages. Matched on the hash the
 // sender computed when it built the message.
+//
+// Returns false whatever happens: the caller reads a true as "a message arrived
+// that the user should look at", and lights the notification LED for it. An
+// acknowledgement is confirmation of something they already did, not something
+// new to read. The screen still redraws, because receiving anything at all
+// counts as a change.
 static bool handle_ack(const mc_packet_t* packet, mesh_state_t* mesh) {
     uint8_t hash[MC_ACK_HASH_SIZE];
     if (!mc_ack_parse(packet->payload, packet->payload_length, hash)) return false;
-    return credit_ack(mesh, hash);
+    credit_ack(mesh, hash);
+    return false;
 }
 
 static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh, const identity_t* identity) {
@@ -590,6 +598,16 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
                 // An advert is where a MeshCore key comes from, so it is also
                 // the moment a conversation with this node becomes possible.
                 want_secret(node, identity);
+
+                // Everything the parse concluded, so an advert that arrives but
+                // yields no name can be told apart from one that was never sent
+                // with a name. The raw frame is logged above; this is our
+                // reading of it, and the two disagreeing is itself the answer.
+                session_log("advert.rx pub=%02x%02x%02x%02x applen=%u role=%u hasname=%u name=\"%s\"",
+                            advert.pub_key[0], advert.pub_key[1], advert.pub_key[2], advert.pub_key[3],
+                            (unsigned)(packet.payload_length > 100 ? packet.payload_length - 100 : 0),
+                            (unsigned)advert.role, advert.has_name ? 1u : 0u,
+                            advert.has_name ? advert.name : "");
 
                 ESP_LOGI(TAG, "advert %s (%s)", advert.has_name ? advert.name : "unnamed",
                          mc_role_name(advert.role));

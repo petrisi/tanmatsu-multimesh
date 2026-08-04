@@ -241,6 +241,7 @@ typedef struct {
 typedef struct {
     const char* name;
     pax_col_t   accent;  // status bar background for this mesh
+    pax_col_t   led;     // the same network on the indicator LED, which needs a purer hue
     rx_stats_t  stats;
 
     node_t nodes[MAX_NODES];

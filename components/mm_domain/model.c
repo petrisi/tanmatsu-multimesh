@@ -20,13 +20,23 @@ const pax_col_t ch_palette[CH_PALETTE_SIZE] = {CH_CYAN, CH_AMBER, CH_GREEN, CH_P
 #define MESH_MC_ACCENT 0xFF14508C  // MeshCore blue
 #define MESH_MT_ACCENT 0xFF1B7A46  // Meshtastic green
 
+// The same two networks on the indicator LED, which is not the same problem.
+// A colour chosen to sit behind black text needs enough green to lift it off
+// the background, and an LED showing that mix reads as pale teal rather than
+// blue. These are the same hues with the green taken out: as bright, but
+// unmistakably blue and green at a glance.
+#define MESH_MC_LED 0xFF0018D0
+#define MESH_MT_LED 0xFF10C040
+
 void model_init(app_model_t* model) {
     memset(model, 0, sizeof(*model));
 
     model->mesh[MESH_MC].name   = "MeshCore";
     model->mesh[MESH_MC].accent = MESH_MC_ACCENT;
+    model->mesh[MESH_MC].led    = MESH_MC_LED;
     model->mesh[MESH_MT].name   = "Meshtastic";
     model->mesh[MESH_MT].accent = MESH_MT_ACCENT;
+    model->mesh[MESH_MT].led    = MESH_MT_LED;
 
     for (int i = 0; i < MESH_COUNT; i++) {
         model->mesh[i].pinned       = true;

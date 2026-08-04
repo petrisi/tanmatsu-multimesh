@@ -127,6 +127,9 @@ static bool drain_crypto(void) {
         switch (result.kind) {
             case CRYPTO_JOB_MC_VERIFY:
                 node->verified = result.ok ? NODE_VERIFY_VALID : NODE_VERIFY_BAD;
+                session_log("verify.result pub=%02x%02x%02x%02x ok=%u name=\"%s\"", result.pub_key[0],
+                            result.pub_key[1], result.pub_key[2], result.pub_key[3], result.ok ? 1u : 0u,
+                            node->long_name);
                 break;
 
             case CRYPTO_JOB_MC_SECRET:
@@ -649,7 +652,7 @@ static void switch_mesh(void) {
     model.active = (model.active + 1) % MESH_COUNT;
     mesh_state_t* mesh = model_active(&model);
     apply_active_net();
-    leds_set_mesh(mesh->accent);
+    leds_set_mesh(mesh->led);
     settings_save_prefs(&model);
     toast("%s", mesh->name);
 }
@@ -1513,7 +1516,7 @@ void app_main(void) {
     }
 
     leds_init();
-    leds_set_mesh(model_active(&model)->accent);
+    leds_set_mesh(model_active(&model)->led);
 
     tx_requests = xQueueCreate(TX_QUEUE_DEPTH, sizeof(tx_request_t));
     tx_events   = xQueueCreate(TX_QUEUE_DEPTH * 3, sizeof(tx_event_t));
