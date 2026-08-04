@@ -247,7 +247,7 @@ static bool handle_routing(const mt_data_t* data, mesh_state_t* mesh) {
     for (int i = 0; i < mesh->count; i++) {
         message_t* msg = (message_t*)model_message_at(mesh, i);
         if (msg == NULL || !msg->used || !msg->outgoing || !msg->dm) continue;
-        if (msg->expected_ack != data->request_id || msg->acked) continue;
+        if (msg->acked || msg->expected_ack_count == 0 || msg->expected_ack[0] != data->request_id) continue;
 
         msg->acked = true;
         msg->tx    = TX_CONFIRMED;
@@ -538,8 +538,9 @@ static uint8_t meshtastic_encode_dm(mesh_state_t* mesh, const identity_t* identi
         // The recipient names the packet it is answering, so remember which one
         // this was. Recovered from the frame rather than threaded back out of
         // the encoder, because the header is where the id actually ended up.
-        msg->expected_ack = (uint32_t)out[8] | ((uint32_t)out[9] << 8) | ((uint32_t)out[10] << 16) |
-                            ((uint32_t)out[11] << 24);
+        msg->expected_ack[0]    = (uint32_t)out[8] | ((uint32_t)out[9] << 8) | ((uint32_t)out[10] << 16) |
+                               ((uint32_t)out[11] << 24);
+        msg->expected_ack_count = 1;
     }
     return len;
 }

@@ -35,6 +35,10 @@
 #define ID_NAME_MAX  23
 #define ID_SHORT_MAX 4
 
+// Outstanding acknowledgements one message can be waiting on: MeshCore's attempt
+// counter is two bits, so four is every attempt it can distinguish.
+#define MSG_ACK_SLOTS 4
+
 // A public key, which on MeshCore is also the node's identity. Declared here
 // rather than beside the other node constants because a message has to remember
 // which key it was sent to, and messages are declared first.
@@ -133,8 +137,16 @@ typedef struct {
     // column reads the same for both halves of a conversation.
     bool     dm;
     char     peer[SENDER_MAX];
-    bool     acked;      // the recipient proved it decrypted this
-    uint32_t expected_ack;  // the hash, or packet id, that would prove it
+    bool acked;  // the recipient proved it decrypted this
+
+    // What would prove it. One entry per attempt, because a MeshCore retry
+    // carries a different attempt counter inside the encrypted plaintext and so
+    // expects a *different* acknowledgement hash. Keeping only the newest means
+    // an acknowledgement for an earlier attempt -- which is the normal outcome
+    // when the reply is merely slow rather than lost -- cannot be recognised,
+    // and a message that was delivered is reported as failed.
+    uint32_t expected_ack[MSG_ACK_SLOTS];
+    uint8_t  expected_ack_count;
 
     // What a resend needs. MeshCore direct messages are retried along a stored
     // route before giving up on it, and a retry has to be re-encrypted to the

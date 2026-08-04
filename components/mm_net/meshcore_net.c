@@ -391,13 +391,20 @@ static bool credit_ack(mesh_state_t* mesh, const uint8_t hash[MC_ACK_HASH_SIZE])
 
     for (int i = 0; i < mesh->count; i++) {
         message_t* msg = (message_t*)model_message_at(mesh, i);
-        if (msg == NULL || !msg->used || !msg->outgoing || !msg->dm) continue;
-        if (msg->expected_ack != value || msg->acked) continue;
+        if (msg == NULL || !msg->used || !msg->outgoing || !msg->dm || msg->acked) continue;
+
+        // Any attempt's hash will do. A reply to the first attempt that arrives
+        // after the second went out still proves delivery.
+        int matched = -1;
+        for (int slot = 0; slot < msg->expected_ack_count; slot++) {
+            if (msg->expected_ack[slot] == value) matched = slot;
+        }
+        if (matched < 0) continue;
 
         msg->acked = true;
         msg->tx    = TX_CONFIRMED;
-        session_log("ack.match hash=%08lx seq=%lu attempt=%u direct=%u", (unsigned long)value,
-                    (unsigned long)msg->seq, (unsigned)msg->dm_attempt, msg->dm_direct ? 1u : 0u);
+        session_log("ack.match hash=%08lx seq=%lu for_attempt=%d latest=%u direct=%u", (unsigned long)value,
+                    (unsigned long)msg->seq, matched, (unsigned)msg->dm_attempt, msg->dm_direct ? 1u : 0u);
         ESP_LOGI(TAG, "dm to %s acknowledged", msg->peer);
         return true;
     }
@@ -411,7 +418,10 @@ static bool credit_ack(mesh_state_t* mesh, const uint8_t hash[MC_ACK_HASH_SIZE])
         for (int i = 0; i < mesh->count && n < (int)sizeof(waiting) - 12; i++) {
             const message_t* msg = model_message_at(mesh, i);
             if (msg == NULL || !msg->used || !msg->outgoing || !msg->dm || msg->acked) continue;
-            n += snprintf(waiting + n, sizeof(waiting) - n, "%s%08lx", n ? "," : "", (unsigned long)msg->expected_ack);
+            for (int slot = 0; slot < msg->expected_ack_count && n < (int)sizeof(waiting) - 12; slot++) {
+                n += snprintf(waiting + n, sizeof(waiting) - n, "%s%08lx", n ? "," : "",
+                              (unsigned long)msg->expected_ack[slot]);
+            }
         }
         session_log("ack.nomatch hash=%08lx waiting=%s", (unsigned long)value, n ? waiting : "-");
     }
@@ -501,8 +511,13 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
     mesh->stats.packets_total++;
 
     if (session_log_active()) {
-        char extra[48];
-        snprintf(extra, sizeof(extra), "rssi=%d snr=%d", -(int)pkt->stats.rssi_pkt_raw / 2, pkt->stats.snr_pkt_raw);
+        // The three stats bytes exactly as the coprocessor reported them. The
+        // documented conversions have not proved trustworthy -- rssi_pkt_raw
+        // arrives as zero for every packet -- so the raw values go in the log
+        // and the reading of them is left until they can be compared.
+        char extra[64];
+        snprintf(extra, sizeof(extra), "rssiraw=%u snrraw=%d sigraw=%u", (unsigned)pkt->stats.rssi_pkt_raw,
+                 (int)pkt->stats.snr_pkt_raw, (unsigned)pkt->stats.signal_rssi_pkt_raw);
         session_log_frame("rx", "mc", extra, pkt->data, pkt->length);
     }
 
@@ -734,8 +749,12 @@ uint8_t mc_encode_dm_attempt(const identity_t* identity, const node_t* peer, con
     if (len == 0) return 0;
 
     if (msg) {
-        msg->expected_ack = (uint32_t)hash[0] | ((uint32_t)hash[1] << 8) | ((uint32_t)hash[2] << 16) |
-                            ((uint32_t)hash[3] << 24);
+        uint32_t expect = (uint32_t)hash[0] | ((uint32_t)hash[1] << 8) | ((uint32_t)hash[2] << 16) |
+                          ((uint32_t)hash[3] << 24);
+        // Remembered alongside the earlier attempts, not instead of them.
+        if (msg->expected_ack_count < MSG_ACK_SLOTS) {
+            msg->expected_ack[msg->expected_ack_count++] = expect;
+        }
         msg->dm_attempt = attempt;
         msg->dm_direct  = direct;
         memcpy(msg->dm_peer_key, peer->key, NODE_KEY_LEN);
@@ -744,8 +763,7 @@ uint8_t mc_encode_dm_attempt(const identity_t* identity, const node_t* peer, con
         session_log("dm.tx seq=%lu to=%02x%02x attempt=%u direct=%u hops=%u path=%s exp=%08lx",
                     (unsigned long)msg->seq, peer->key[0], peer->key[1], (unsigned)attempt, direct ? 1u : 0u,
                     direct ? (unsigned)MC_PATH_COUNT(peer->out_path_ctrl) : 0u,
-                    direct ? path_text(peer->out_path_ctrl, peer->out_path) : "-",
-                    (unsigned long)msg->expected_ack);
+                    direct ? path_text(peer->out_path_ctrl, peer->out_path) : "-", (unsigned long)expect);
     }
     return len;
 }
