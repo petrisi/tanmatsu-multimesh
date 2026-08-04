@@ -516,17 +516,23 @@ static void draw_status(const app_model_t* model) {
     // Where the composer is aimed, on its own dark chip: neither a channel
     // colour nor the conversation colour is reliably legible directly against
     // the mesh accent.
+    // Clipped, because the right of the bar is occupied and a long name would
+    // otherwise run straight through the clock. Contacts are the ones that get
+    // long -- a MeshCore name can be 32 bytes.
+#define STATUS_CHIP_CELLS 16
+    char      full[NODE_NAME_MAX + 4];
     char      label[NODE_NAME_MAX + 4];
     pax_col_t label_col = ch->color;
     if (mesh->target_contact) {
         const node_t* peer = model_target_node((mesh_state_t*)mesh, model->active);
         char          who[NODE_NAME_MAX + 1] = "(gone)";
         if (peer) model_node_label(peer, model->active, who, sizeof(who));
-        snprintf(label, sizeof(label), ">%s", who);
+        snprintf(full, sizeof(full), ">%s", who);
         label_col = peer ? COL_DM : COL_BAD;
     } else {
-        snprintf(label, sizeof(label), "%s", ch->name);
+        snprintf(full, sizeof(full), "%s", ch->name);
     }
+    utf8_clip(label, sizeof(label), full, STATUS_CHIP_CELLS);
     float chip_w = (float)strlen(label) * CHAR_W + 12;
     float chip_x = 8 + 11 * CHAR_W;
     pax_draw_round_rect(&fb, COL_CHIP, chip_x, 3, chip_w, STATUS_H - 6, 4);
@@ -554,6 +560,18 @@ static void draw_status(const app_model_t* model) {
     if (session_log_active()) {
         x -= 6 + 4 * CHAR_W;
         pax_draw_text(&fb, COL_BAD, FONT, FONT_SIZE, x, 4, "REC");
+    }
+
+    // Off-grid repeat: present only when it is on, so it never takes space it
+    // has no use for. Dim while idle, bright for a moment each time a packet is
+    // relayed, and carrying the count -- which is the part worth having, since
+    // repeating for nobody looks exactly like repeating for everybody.
+    if (model->active == MESH_MC && model->settings.mc_repeater) {
+        char badge[12];
+        snprintf(badge, sizeof(badge), "RPT %lu", (unsigned long)(model->repeat_count > 999 ? 999
+                                                                                            : model->repeat_count));
+        x -= 6 + (float)strlen(badge) * CHAR_W;
+        pax_draw_text(&fb, model->repeat_busy ? COL_OK : COL_DIM, FONT, FONT_SIZE, x, 4, badge);
     }
 
     x -= 6 + 3 * CHAR_W;
@@ -1564,15 +1582,6 @@ static void draw_node_short(const app_model_t* model) {
     float hx = bx + 12;
     hx       = hint(hx, y, CAP_CROSS, "cancel");
     hint_text(hx, y, "enter save");
-}
-
-// Render a stored coordinate for display. Kept in millionths on the wire, which
-// is what MeshCore carries, so the decimal point goes back in here.
-static void coord_text(char* out, size_t out_size, int32_t millionths) {
-    int32_t whole = millionths / 1000000;
-    int32_t frac  = millionths % 1000000;
-    if (frac < 0) frac = -frac;
-    snprintf(out, out_size, "%s%ld.%06ld", (millionths < 0 && whole == 0) ? "-" : "", (long)whole, (long)frac);
 }
 
 static void setting_row(const app_model_t* model, setting_field_t field, char* label, size_t label_size, char* value,

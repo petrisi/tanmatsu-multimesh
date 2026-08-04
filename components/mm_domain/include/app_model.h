@@ -445,6 +445,12 @@ typedef struct {
     uint32_t last_advert_ms;  // manual announce cooldown
     char     node_short_edit[NODE_SHORT_MAX + 1];  // the short name being typed
 
+    // Off-grid repeat, shown on the status bar. The count matters more than it
+    // looks: a node that has been repeating all afternoon and relayed nothing is
+    // spending its battery on an empty room, and there is no other way to tell.
+    uint32_t repeat_count;
+    bool     repeat_busy;  // briefly true after each relay, so the badge blinks
+
     radio_state_t radio;
     int           battery_pct;
     bool          charging;

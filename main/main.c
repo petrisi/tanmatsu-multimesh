@@ -162,12 +162,27 @@ static bool drain_crypto(void) {
 // Put MeshCore repeats on the air once their backoff has elapsed. Only while
 // MeshCore is the active network, for the same reason acknowledgements are:
 // there is one radio, and it is tuned to one network.
+// How long the repeat badge stays lit after a relay. Long enough to notice on a
+// glance, short enough that a steady stream still reads as flickering rather
+// than as permanently on.
+#define REPEAT_BLINK_MS 700
+
+static uint32_t last_repeat_ms;
+
 static void forward_repeats(void) {
+    // The badge is driven here rather than in the UI so nothing below the event
+    // loop has to know what time it is.
+    model.repeat_busy = last_repeat_ms != 0 && (now_ms() - last_repeat_ms) < REPEAT_BLINK_MS;
+
     if (model.active != MESH_MC) return;
 
     tx_request_t request = {.mesh = MESH_MC, .seq = UINT32_MAX};
     while (mc_take_due_repeat(request.frame, sizeof(request.frame), &request.length)) {
         if (xQueueSend(tx_requests, &request, 0) != pdTRUE) return;
+
+        model.repeat_count++;
+        last_repeat_ms    = now_ms();
+        model.repeat_busy = true;
     }
 }
 
