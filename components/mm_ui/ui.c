@@ -36,6 +36,7 @@ static const char TAG[] = "ui";
 #define COL_OK      0xFF5FD07A
 #define COL_WARN    0xFFE8D44C
 #define COL_BAD     0xFFE24B4B
+#define COL_DM      0xFFE0A0FF  // conversations, distinct from every channel colour
 
 // Keycap colours, matched to the physical legends on the top row.
 #define KEY_RED    0xFFE24B4B
@@ -423,14 +424,24 @@ static void draw_status(const app_model_t* model) {
     pax_draw_rect(&fb, mesh->accent, 0, 0, ui_w, STATUS_H);
     pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, 8, 4, mesh->name);
 
-    // The channel sits on its own dark chip: the channel colour would not be
-    // reliably legible directly against the mesh accent.
-    char label[sizeof(ch->name) + 2];
-    snprintf(label, sizeof(label), "%s", ch->name);
+    // Where the composer is aimed, on its own dark chip: neither a channel
+    // colour nor the conversation colour is reliably legible directly against
+    // the mesh accent.
+    char      label[NODE_NAME_MAX + 4];
+    pax_col_t label_col = ch->color;
+    if (mesh->target_contact) {
+        const node_t* peer = model_target_node((mesh_state_t*)mesh, model->active);
+        char          who[NODE_NAME_MAX + 1] = "(gone)";
+        if (peer) model_node_label(peer, model->active, who, sizeof(who));
+        snprintf(label, sizeof(label), ">%s", who);
+        label_col = peer ? COL_DM : COL_BAD;
+    } else {
+        snprintf(label, sizeof(label), "%s", ch->name);
+    }
     float chip_w = (float)strlen(label) * CHAR_W + 12;
     float chip_x = 8 + 11 * CHAR_W;
     pax_draw_round_rect(&fb, COL_CHIP, chip_x, 3, chip_w, STATUS_H - 6, 4);
-    pax_draw_text(&fb, ch->color, FONT, FONT_SIZE, chip_x + 6, 4, label);
+    pax_draw_text(&fb, label_col, FONT, FONT_SIZE, chip_x + 6, 4, label);
 
     // Right side: radio, battery, clock.
     float x = ui_w - 8 - 5 * CHAR_W;
@@ -504,7 +515,14 @@ static void draw_empty_state(const app_model_t* model) {
     float w = (float)strlen(line) * CHAR_W;
     pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, (ui_w - w) / 2, (MSG_TOP + msg_bottom) / 2 - LINE_H, line);
 
-    snprintf(line, sizeof(line), "type below to send on #%s", mesh->channels[mesh->input_channel].name);
+    if (mesh->target_contact) {
+        const node_t* peer = model_target_node((mesh_state_t*)mesh, model->active);
+        char          who[NODE_NAME_MAX + 1] = "a contact that is gone";
+        if (peer) model_node_label(peer, model->active, who, sizeof(who));
+        snprintf(line, sizeof(line), "type below to message %s", who);
+    } else {
+        snprintf(line, sizeof(line), "type below to send on %s", mesh->channels[mesh->input_channel].name);
+    }
     w = (float)strlen(line) * CHAR_W;
     pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, (ui_w - w) / 2, (MSG_TOP + msg_bottom) / 2 + 4, line);
 }
@@ -550,15 +568,31 @@ static void draw_messages(const app_model_t* model) {
         if (line->first) {
             draw_time_cell(model, msg, y);
 
-            char chan[CH_DISPLAY_MAX + 1];
-            snprintf(chan, sizeof(chan), "%.*s", chan_cells(model), ch->display);
-            pax_draw_text(&fb, ch->color, FONT, FONT_SIZE, x_chan(), y, chan);
+            // A direct message takes over the channel column: which channel it
+            // travelled on is an implementation detail, who it was with is not.
+            // The arrow gives the direction, so the sender column can stay empty
+            // rather than repeating the same name on every row.
+            char chan[CH_DISPLAY_MAX + 2];
+            if (msg->dm) {
+                snprintf(chan, sizeof(chan), "%c%.*s", msg->outgoing ? '>' : '<', chan_cells(model) - 1, msg->peer);
+                pax_draw_text(&fb, COL_DM, FONT, FONT_SIZE, x_chan(), y, chan);
+            } else {
+                snprintf(chan, sizeof(chan), "%.*s", chan_cells(model), ch->display);
+                pax_draw_text(&fb, ch->color, FONT, FONT_SIZE, x_chan(), y, chan);
+            }
 
-            char who[COL_FROM_CELLS + 1];
-            snprintf(who, sizeof(who), "%.*s", COL_FROM_CELLS, msg->sender);
-            // Colour alone distinguishes a NodeInfo short name from a raw node
-            // id -- no prefix, so the column is the same width either way.
-            pax_draw_text(&fb, msg->sender_named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, x_from(model), y, who);
+            if (!msg->dm) {
+                char who[COL_FROM_CELLS + 1];
+                snprintf(who, sizeof(who), "%.*s", COL_FROM_CELLS, msg->sender);
+                // Colour alone distinguishes a NodeInfo short name from a raw
+                // node id -- no prefix, so the column is the same width either
+                // way.
+                pax_draw_text(&fb, msg->sender_named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, x_from(model), y,
+                              who);
+            } else if (msg->outgoing && msg->acked) {
+                // The one place either network offers a real delivery proof.
+                pax_draw_text(&fb, COL_OK, FONT, FONT_SIZE, x_from(model), y, "ack");
+            }
 
             if (model->show_meta) {
                 char meta[16];
@@ -613,9 +647,10 @@ static void draw_composer(const app_model_t* model) {
 
     pax_draw_line(&fb, COL_SEP, 6, sep_y, ui_w - 6, sep_y);
 
-    // The prompt carries the target channel's colour: the composer should never
-    // be ambiguous about where the text is going.
-    pax_draw_text(&fb, ch->color, FONT, FONT_SIZE, 6, composer_y + 3, ">");
+    // The prompt carries the target's colour: the composer should never be
+    // ambiguous about where the text is going, and a private message going out
+    // on a channel by mistake is the version of that which actually matters.
+    pax_draw_text(&fb, mesh->target_contact ? COL_DM : ch->color, FONT, FONT_SIZE, 6, composer_y + 3, ">");
 
     float x    = 6 + 2 * CHAR_W;
     int   room = (int)((ui_w - 8 - 5 * CHAR_W - x) / CHAR_W);
@@ -679,13 +714,39 @@ static void overlay_box(float bw, float bh, float* out_x, float* out_y, pax_col_
     *out_y = by;
 }
 
+static bool node_is_target(const mesh_state_t* mesh, mesh_id_t id, const node_t* node) {
+    if (!mesh->target_contact) return false;
+    return id == MESH_MT ? node->node_num == mesh->target_num
+                         : memcmp(node->key, mesh->target_key, NODE_KEY_LEN) == 0;
+}
+
+// The picker lists channels and then contacts as one column, because the
+// composer aims at exactly one of them: a target, not two separate settings.
+// Indices above the channel count are contacts, in the order the nodes view
+// shows them.
+static int ui_picker_contacts(const app_model_t* model, int* order, int max) {
+    const mesh_state_t* mesh = &model->mesh[model->active];
+    return model_nodes_by_recency(mesh, order, max);
+}
+
+int ui_picker_count(const app_model_t* model) {
+    int order[MAX_NODES];
+    return model->mesh[model->active].channel_count + ui_picker_contacts(model, order, MAX_NODES);
+}
+
 static void draw_picker(const app_model_t* model) {
     const mesh_state_t* mesh = &model->mesh[model->active];
 
+    int order[MAX_NODES];
+    int contacts = ui_picker_contacts(model, order, MAX_NODES);
+    // Enough contacts to be useful without pushing the box off screen; the rest
+    // are reachable from the nodes view.
+    int contact_rows = contacts < 8 ? contacts : 8;
+
     float bw = 44 * CHAR_W;
-    float bh = LINE_H * (mesh->channel_count + 4) + 12;
+    float bh = LINE_H * (mesh->channel_count + contact_rows + 6) + 12;
     float bx, by;
-    overlay_box(bw, bh, &bx, &by, mesh->accent, "Channels");
+    overlay_box(bw, bh, &bx, &by, mesh->accent, "Send to");
 
     float y = by + 8 + LINE_H * 1.5f;
     for (int i = 0; i < mesh->channel_count; i++, y += LINE_H) {
@@ -697,9 +758,54 @@ static void draw_picker(const app_model_t* model) {
         snprintf(label, sizeof(label), "%s", ch->name);
         pax_draw_text(&fb, ch->color, FONT, FONT_SIZE, bx + 32, y, label);
 
+        bool current = !mesh->target_contact && i == mesh->input_channel;
         char shown[16];
-        snprintf(shown, sizeof(shown), "%-4s %s", ch->display, i == mesh->input_channel ? "<" : " ");
+        snprintf(shown, sizeof(shown), "%-4s %s", ch->display, current ? "<" : " ");
         pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + bw - 12 - 6 * CHAR_W, y, shown);
+    }
+
+    pax_draw_line(&fb, COL_SEP, bx + 10, y, bx + bw - 10, y);
+    pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, bx + 14, y + 2, "contacts");
+    y += LINE_H + 2;
+
+    if (contacts == 0) {
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "nobody heard yet");
+        y += LINE_H;
+    }
+
+    // Scroll the contact window so the selection stays visible.
+    int first = 0;
+    int chosen_contact = model->picker_index - mesh->channel_count;
+    if (chosen_contact >= contact_rows) first = chosen_contact - contact_rows + 1;
+
+    for (int i = first; i < contacts && i < first + contact_rows; i++, y += LINE_H) {
+        const node_t* node = &mesh->nodes[order[i]];
+        if (mesh->channel_count + i == model->picker_index) {
+            pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
+        }
+
+        char label[NODE_NAME_MAX + 2];
+        model_node_label(node, model->active, label, sizeof(label));
+        pax_draw_text(&fb, node->named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, bx + 32, y, label);
+
+        // Whether a private message to this contact would actually be private.
+        // Saying nothing here would let the user assume more than is true.
+        const char* state = "open";
+        pax_col_t   col   = COL_WARN;
+        if (node->has_secret) {
+            state = "e2e";
+            col   = COL_OK;
+        } else if (node->secret_pending) {
+            state = "...";
+            col   = COL_DIM;
+        } else if (model->active == MESH_MC) {
+            state = "no key";
+            col   = COL_BAD;
+        }
+        pax_draw_text(&fb, col, FONT, FONT_SIZE, bx + bw - 12 - 8 * CHAR_W, y, state);
+
+        bool current = mesh->target_contact && node_is_target(mesh, model->active, node);
+        if (current) pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + bw - 12 - CHAR_W, y, "<");
     }
 
     y       += 4;
@@ -1190,6 +1296,7 @@ static void draw_node_detail(const app_model_t* model) {
     float hx = bx + 12;
     float hy = by + bh - LINE_H - 8;
     hx       = hint(hx, hy, CAP_CROSS, "back");
+    hx       = hint(hx, hy, CAP_TRI, "message");
     hint(hx, hy, CAP_SQUARE, "remove node");
 }
 

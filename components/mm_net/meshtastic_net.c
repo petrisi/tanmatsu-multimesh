@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "base64.h"
+#include "crypto_jobs.h"
 #include "dedup.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -149,7 +150,111 @@ static void detail(mesh_state_t* mesh) {
              (unsigned long)other_ports, (unsigned long)mesh->stats.duplicates);
 }
 
-static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh) {
+// Ask for the end-to-end key with a node, once. Only possible after a NodeInfo
+// has told us their public key.
+static void want_secret(node_t* node, const identity_t* identity) {
+    if (node == NULL || node->has_secret || node->secret_pending) return;
+    if (!identity->has_mt_keypair || !node->has_public_key) return;
+
+    if (crypto_queue_mt_secret(node->node_num, node->public_key, identity->mt_private_key)) {
+        node->secret_pending = true;
+    }
+}
+
+// Nothing on the air says "this is end-to-end encrypted". A PKI direct message
+// is recognised by a zero channel hash on a packet addressed to us and nothing
+// else -- the authentication tag is what decides, which is the one advantage
+// this has over the channel cipher.
+static bool try_pki(mt_packet_t* packet, mesh_state_t* mesh, const identity_t* identity, node_t* node,
+                    mt_data_t* out) {
+    if (!identity->has_mt_keypair || packet->channel_hash != 0) return false;
+    if (packet->to != identity->node_num) return false;
+    if (node == NULL || !node->has_secret) return false;
+    if (packet->payload_length <= MT_PKI_OVERHEAD) return false;
+
+    uint8_t plain[MT_MAX_PAYLOAD_SIZE];
+    size_t  plain_len = 0;
+    if (!mt_pki_decrypt(node->shared_secret, packet->from, packet->id, packet->payload, packet->payload_length, plain,
+                        sizeof(plain), &plain_len)) {
+        return false;
+    }
+    return mt_data_parse(plain, plain_len, out);
+}
+
+// What to do with a decoded payload, whichever cipher got us here. `channel` is
+// the row's channel column; `dm` says the packet was addressed to us rather than
+// broadcast, which is true of both an end-to-end message and one merely
+// addressed to us under a channel key.
+static bool deliver(const mt_data_t* data, const mt_packet_t* packet, mesh_state_t* mesh, node_t* node,
+                    const lora_protocol_lora_packet_t* pkt, int channel, bool dm, const identity_t* identity) {
+    // NodeInfo is what turns a bare node number into a name, and where the key
+    // for an end-to-end conversation comes from. Handled before the text path
+    // because it is not a message and must not be shown as one.
+    if (data->portnum == MT_PORTNUM_NODEINFO) {
+        mt_user_t user;
+        if (node && mt_user_parse(data->payload, data->payload_length, &user)) {
+            snprintf(node->long_name, sizeof(node->long_name), "%s", user.long_name);
+            snprintf(node->short_name, sizeof(node->short_name), "%s", user.short_name);
+            node->hw_model = user.hw_model;
+            node->role     = user.role;
+            if (user.has_public_key) {
+                // A node that changes its key is a different node as far as
+                // encryption goes, so the cached secret has to go with it.
+                if (!node->has_public_key || memcmp(node->public_key, user.public_key, NODE_KEY_LEN) != 0) {
+                    memcpy(node->public_key, user.public_key, NODE_KEY_LEN);
+                    node->has_public_key = true;
+                    node->has_secret     = false;
+                    node->secret_pending = false;
+                }
+                want_secret(node, identity);
+            }
+            node->named = user.long_name[0] != '\0' || user.short_name[0] != '\0';
+            ESP_LOGI(TAG, "nodeinfo %08lx = %s (%s)", (unsigned long)packet->from, user.long_name, user.short_name);
+        }
+        other_ports++;
+        return false;
+    }
+
+    if (data->portnum != MT_PORTNUM_TEXT_MESSAGE) {
+        other_ports++;
+        return false;
+    }
+
+    char   body[TEXT_MAX];
+    size_t len = data->payload_length < sizeof(body) - 1 ? data->payload_length : sizeof(body) - 1;
+    memcpy(body, data->payload, len);
+    body[len] = '\0';
+
+    // Prefer the short name we learned from a NodeInfo. Until one arrives the
+    // sender is the low 16 bits of the node number, and colour rather than a
+    // prefix marks it as an id.
+    char who[SENDER_MAX];
+    bool named = node && node->named && node->short_name[0];
+    if (named) {
+        snprintf(who, sizeof(who), "%s", node->short_name);
+    } else {
+        snprintf(who, sizeof(who), "%04lx", (unsigned long)(packet->from & 0xFFFF));
+    }
+
+    message_t* msg = model_push(mesh, (uint8_t)channel, who, named, body, false);
+    msg->dm        = dm;
+    if (dm) snprintf(msg->peer, sizeof(msg->peer), "%s", who);
+    // Meshtastic stamps no time in the payload, so this is our receive clock.
+    msg->rssi_dbm  = -(int)pkt->stats.rssi_pkt_raw / 2;
+    msg->snr_db_x4 = pkt->stats.snr_pkt_raw;
+    msg->hops      = mt_hops_taken(packet);
+    msg->hop_start = packet->hop_start;
+    msg->hop_limit = packet->hop_limit;
+    if (packet->relay_node) snprintf(msg->relayed_by, sizeof(msg->relayed_by), "%02x", packet->relay_node);
+
+    text_msgs++;
+    mesh->stats.messages++;
+    ESP_LOGI(TAG, "%s [%d dBm] %s: %s", dm ? "dm" : "msg", msg->rssi_dbm, who, body);
+    return true;
+}
+
+static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh,
+                              const identity_t* identity) {
     mesh->stats.packets_total++;
 
     mt_packet_t packet;
@@ -182,6 +287,16 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         node->hops      = mt_hops_taken(&packet);
     }
 
+    // End-to-end first. It is tried before the channels because a PKI packet
+    // carries a zero channel hash, which an unencrypted channel could otherwise
+    // match by coincidence and then fail to parse.
+    mt_data_t pki_data;
+    if (try_pki(&packet, mesh, identity, node, &pki_data)) {
+        bool shown = deliver(&pki_data, &packet, mesh, node, pkt, (uint8_t)mesh->input_channel, true, identity);
+        detail(mesh);
+        return shown;
+    }
+
     for (int i = 0; i < mesh->channel_count; i++) {
         const channel_t* ch = &mesh->channels[i];
         if (!ch->ready || packet.channel_hash != ch->hash) continue;
@@ -202,62 +317,9 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         // NodeInfo is what turns a bare node number into a name. Handled before
         // the text-message path because it is not a message and must not be
         // shown as one.
-        if (data.portnum == MT_PORTNUM_NODEINFO) {
-            mt_user_t user;
-            if (node && mt_user_parse(data.payload, data.payload_length, &user)) {
-                snprintf(node->long_name, sizeof(node->long_name), "%s", user.long_name);
-                snprintf(node->short_name, sizeof(node->short_name), "%s", user.short_name);
-                node->hw_model = user.hw_model;
-                node->role     = user.role;
-                if (user.has_public_key) {
-                    memcpy(node->public_key, user.public_key, NODE_KEY_LEN);
-                    node->has_public_key = true;
-                }
-                node->named = user.long_name[0] != '\0' || user.short_name[0] != '\0';
-                ESP_LOGI(TAG, "nodeinfo %08lx = %s (%s)", (unsigned long)packet.from, user.long_name,
-                         user.short_name);
-            }
-            other_ports++;
-            detail(mesh);
-            return false;
-        }
-
-        if (data.portnum != MT_PORTNUM_TEXT_MESSAGE) {
-            other_ports++;
-            detail(mesh);
-            return false;
-        }
-
-        char body[TEXT_MAX];
-        size_t len = data.payload_length < sizeof(body) - 1 ? data.payload_length : sizeof(body) - 1;
-        memcpy(body, data.payload, len);
-        body[len] = '\0';
-
-        // Prefer the short name we learned from a NodeInfo. Until one arrives
-        // the sender is the low 16 bits of the node number, and colour rather
-        // than a prefix marks it as an id.
-        char who[SENDER_MAX];
-        bool named = node && node->named && node->short_name[0];
-        if (named) {
-            snprintf(who, sizeof(who), "%s", node->short_name);
-        } else {
-            snprintf(who, sizeof(who), "%04lx", (unsigned long)(attempt.from & 0xFFFF));
-        }
-
-        message_t* msg = model_push(mesh, (uint8_t)i, who, named, body, false);
-        // Meshtastic stamps no time in the payload, so this is our receive clock.
-        msg->rssi_dbm  = -(int)pkt->stats.rssi_pkt_raw / 2;
-        msg->snr_db_x4 = pkt->stats.snr_pkt_raw;
-        msg->hops      = mt_hops_taken(&attempt);
-        msg->hop_start = attempt.hop_start;
-        msg->hop_limit = attempt.hop_limit;
-        if (attempt.relay_node) snprintf(msg->relayed_by, sizeof(msg->relayed_by), "%02x", attempt.relay_node);
-
-        text_msgs++;
-        mesh->stats.messages++;
+        bool shown = deliver(&data, &attempt, mesh, node, pkt, i, attempt.to == identity->node_num, identity);
         detail(mesh);
-        ESP_LOGI(TAG, "msg [%d dBm] %s: %s", msg->rssi_dbm, who, body);
-        return true;
+        return shown;
     }
 
     mesh->stats.not_our_channel++;
@@ -306,7 +368,66 @@ static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const iden
                         msg_seq, out, out_max);
 }
 
-// NodeInfo: how a Meshtastic node tells the mesh what to call it. Unsigned and
+// A direct message. End-to-end encrypted when the recipient has published a key
+// and we have agreed one with them; otherwise addressed to them but encrypted
+// under the channel key, which every node understands and everyone on the
+// channel can read. The UI says which happened -- silently sending something
+// weaker than the user expects would be the worse failure.
+static uint8_t meshtastic_encode_dm(mesh_state_t* mesh, const identity_t* identity, const node_t* peer,
+                                    const char* text, message_t* msg, uint8_t* out, size_t out_max) {
+    if (peer == NULL || peer->node_num == 0) return 0;
+
+    uint8_t payload[MT_MAX_PAYLOAD_SIZE];
+    size_t  payload_len = mt_data_encode(MT_PORTNUM_TEXT_MESSAGE, (const uint8_t*)text, strlen(text), payload,
+                                         sizeof(payload));
+    if (payload_len == 0) return 0;
+
+    uint32_t id = esp_random();
+    if (id == 0) id = 1;
+
+    if (identity->has_mt_keypair && peer->has_secret) {
+        uint8_t sealed[MT_MAX_PAYLOAD_SIZE];
+        if (payload_len + MT_PKI_OVERHEAD > sizeof(sealed)) return 0;
+
+        // The nonce extension must be fresh per packet: with the id it is the
+        // whole nonce, and a repeat under one key breaks CCM outright.
+        uint32_t extra_nonce = esp_random();
+        if (!mt_pki_encrypt(peer->shared_secret, identity->node_num, id, extra_nonce, payload, payload_len, sealed,
+                            sizeof(sealed))) {
+            return 0;
+        }
+
+        // Channel hash zero is how the far end knows to try its own key.
+        uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, MT_DEFAULT_HOPS, 0, sealed,
+                                      (uint8_t)(payload_len + MT_PKI_OVERHEAD), out, out_max);
+        if (len == 0) return 0;
+
+        if (msg) {
+            msg->acked = false;
+            track_transmission(identity->node_num, id, msg->seq);
+        }
+        return len;
+    }
+
+    // No key for them: fall back to the channel cipher, addressed to one node.
+    if (mesh->input_channel >= mesh->channel_count) return 0;
+    const channel_t* ch = &mesh->channels[mesh->input_channel];
+    if (!ch->ready) return 0;
+
+    mt_key_t key = {.length = ch->key_len};
+    if (ch->key_len) memcpy(key.bytes, ch->key, ch->key_len);
+    if (!mt_encrypt(&key, identity->node_num, id, payload, payload_len)) return 0;
+
+    uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, MT_DEFAULT_HOPS, ch->hash, payload,
+                                  (uint8_t)payload_len, out, out_max);
+    if (len == 0) return 0;
+
+    if (msg) track_transmission(identity->node_num, id, msg->seq);
+    return len;
+}
+
+// NodeInfo: how a Meshtastic node tells the mesh what to call it, and where it
+// publishes the key others need to message it end to end. Unsigned and
 // unauthenticated -- any node may claim any name -- which is why nothing here
 // records a verification verdict.
 static uint8_t meshtastic_encode_advert(mesh_state_t* mesh, uint8_t channel, const identity_t* identity,
@@ -315,6 +436,10 @@ static uint8_t meshtastic_encode_advert(mesh_state_t* mesh, uint8_t channel, con
     snprintf(user.id, sizeof(user.id), "%s", identity->node_id);
     snprintf(user.long_name, sizeof(user.long_name), "%s", identity->name);
     snprintf(user.short_name, sizeof(user.short_name), "%s", identity->short_name);
+    if (identity->has_mt_keypair) {
+        memcpy(user.public_key, identity->mt_public_key, MT_PUBLIC_KEY_LEN);
+        user.has_public_key = true;
+    }
 
     uint8_t body[MT_MAX_PAYLOAD_SIZE];
     size_t  body_len = mt_user_encode(&user, body, sizeof(body));
@@ -339,5 +464,6 @@ const mesh_net_t mesh_net_meshtastic = {
     .local_sender    = meshtastic_local_sender,
     .handle          = meshtastic_handle,
     .encode          = meshtastic_encode,
+    .encode_dm       = meshtastic_encode_dm,
     .encode_advert   = meshtastic_encode_advert,
 };

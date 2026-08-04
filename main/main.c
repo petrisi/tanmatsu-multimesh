@@ -16,6 +16,7 @@
 #include "bsp/input.h"
 #include "bsp/power.h"
 #include "bsp/rtc.h"
+#include "crypto_jobs.h"
 #include "driver/gpio.h"
 #include "ed25519.h"
 #include "esp_log.h"
@@ -24,7 +25,7 @@
 #include "freertos/task.h"
 #include "leds.h"
 #include "mesh_net.h"
-#include "mesh_verify.h"
+#include "meshcore_net.h"
 #include "meshtastic_crypto.h"
 #include "nodestore.h"
 #include "nvs_flash.h"
@@ -87,38 +88,66 @@ static void tx_worker(void* arg) {
     }
 }
 
-// --- signature verification ----------------------------------------------
+// --- public-key work -----------------------------------------------------
 //
-// Checking a MeshCore advert costs about a second of arithmetic. It runs here,
-// below the transmit worker, so neither drawing nor a queued send ever waits on
-// it. Like the transmit worker it touches nothing but its own queues; the
-// verdicts are applied to the model by the event loop.
+// Verifying an advert or agreeing a conversation key costs about a second of
+// arithmetic. It runs here, below the transmit worker, so neither drawing nor a
+// queued send ever waits on it. Like the transmit worker it touches nothing but
+// its own queues; results are applied to the model by the event loop.
 
-static void verify_worker(void* arg) {
+static void crypto_worker(void* arg) {
     (void)arg;
     while (1) {
-        mc_verify_run_one(1000);
+        crypto_run_one(1000);
     }
 }
 
-// Apply finished verdicts. Returns true if anything changed on screen.
-static bool drain_verifications(void) {
-    bool               changed = false;
-    mc_verify_result_t result;
+// Apply finished results. Returns true if anything changed on screen.
+static bool drain_crypto(void) {
+    bool            changed = false;
+    crypto_result_t result;
 
-    while (mc_verify_take_result(&result)) {
-        mesh_state_t* mesh = &model.mesh[MESH_MC];
-        for (int i = 0; i < MAX_NODES; i++) {
-            node_t* node = &mesh->nodes[i];
-            if (!node->used || memcmp(node->key, result.pub_key, NODE_KEY_LEN) != 0) continue;
+    while (crypto_take_result(&result)) {
+        mesh_id_t     id   = result.kind == CRYPTO_JOB_MT_SECRET ? MESH_MT : MESH_MC;
+        mesh_state_t* mesh = &model.mesh[id];
 
-            node->verified = result.valid ? NODE_VERIFY_VALID : NODE_VERIFY_BAD;
-            nodestore_mark_dirty(MESH_MC);
-            changed = true;
-            break;
+        node_t* node = id == MESH_MT ? model_node_find_mt(mesh, result.node_num)
+                                     : model_node_find_mc(mesh, result.pub_key);
+        // The node may have been pruned or cleared while the job was queued.
+        if (node == NULL) continue;
+
+        switch (result.kind) {
+            case CRYPTO_JOB_MC_VERIFY:
+                node->verified = result.ok ? NODE_VERIFY_VALID : NODE_VERIFY_BAD;
+                break;
+
+            case CRYPTO_JOB_MC_SECRET:
+            case CRYPTO_JOB_MT_SECRET:
+                node->secret_pending = false;
+                node->has_secret     = result.ok;
+                if (result.ok) memcpy(node->shared_secret, result.secret, NODE_KEY_LEN);
+                break;
+
+            default: continue;
         }
+
+        nodestore_mark_dirty(id);
+        changed = true;
     }
     return changed;
+}
+
+// Put any acknowledgement the MeshCore receive path built onto the transmit
+// queue. Built there because only that stack knows what proves delivery; queued
+// here because only this loop owns the transmitter.
+static void forward_acks(void) {
+    tx_request_t request = {.mesh = MESH_MC, .seq = UINT32_MAX};
+    while (mc_take_pending_ack(request.frame, sizeof(request.frame), &request.length)) {
+        if (xQueueSend(tx_requests, &request, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "transmit queue full; acknowledgement dropped");
+            return;
+        }
+    }
 }
 
 // Locate a message by sequence number so a worker report can be applied to it.
@@ -327,6 +356,22 @@ static void composer_send(void) {
         return;
     }
 
+    // A conversation, if one is selected. Checked before anything is pushed so a
+    // contact that has since been pruned fails the send rather than quietly
+    // broadcasting a private message to a channel.
+    node_t* peer = NULL;
+    if (mesh->target_contact) {
+        peer = model_target_node(mesh, model.active);
+        if (peer == NULL) {
+            toast("that contact is gone - pick another target");
+            return;
+        }
+        if (!peer->has_secret && model.active == MESH_MC) {
+            toast(peer->secret_pending ? "still agreeing a key - try again shortly" : "no key for this contact yet");
+            return;
+        }
+    }
+
     // The local echo goes in first so the message has a sequence number for the
     // encoder to attach repeats to, and so the user sees it immediately rather
     // than after the radio has finished.
@@ -336,10 +381,19 @@ static void composer_send(void) {
     message_t*  msg    = model_push(mesh, (uint8_t)mesh->input_channel, sender, true, model.composer, true);
     msg->tx        = TX_QUEUED;
     msg->tx_tick_ms = now_ms();
+    if (peer) {
+        msg->dm = true;
+        model_node_label(peer, model.active, msg->peer, sizeof(msg->peer));
+    }
 
     tx_request_t request = {.mesh = model.active, .seq = msg->seq};
-    request.length = nets[model.active]->encode(mesh, (uint8_t)mesh->input_channel, &model.identity, model.composer,
-                                                msg->seq, request.frame, sizeof(request.frame));
+    if (peer) {
+        request.length = nets[model.active]->encode_dm(mesh, &model.identity, peer, model.composer, msg,
+                                                       request.frame, sizeof(request.frame));
+    } else {
+        request.length = nets[model.active]->encode(mesh, (uint8_t)mesh->input_channel, &model.identity,
+                                                    model.composer, msg->seq, request.frame, sizeof(request.frame));
+    }
     if (request.length == 0) {
         msg->tx = TX_FAILED;
         toast("could not encode message");
@@ -466,7 +520,7 @@ static bool radio_poll(void) {
         if (!radio_receive(&packet, 0)) break;
 
         mesh_state_t* mesh = model_active(&model);
-        bool          message = nets[model.active]->handle(&packet, mesh);
+        bool          message = nets[model.active]->handle(&packet, mesh, &model.identity);
         // Any received packet updates a node's last-heard stamp.
         nodestore_mark_dirty(model.active);
         if (message) {
@@ -865,6 +919,23 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
     int           count = model_nodes_by_recency(mesh, order, MAX_NODES);
 
     switch (key) {
+        case BSP_INPUT_NAVIGATION_KEY_F2:  // start a conversation with this node
+            if (model.node_index >= 0 && model.node_index < count) {
+                node_t* node = &mesh->nodes[order[model.node_index]];
+                model_target_set_contact(mesh, model.active, node);
+                model.overlay = OVERLAY_NONE;
+
+                char label[NODE_NAME_MAX + 1];
+                model_node_label(node, model.active, label, sizeof(label));
+                if (node->has_secret) {
+                    toast("messaging %s", label);
+                } else if (model.active == MESH_MT) {
+                    toast("%s: no key, channel-encrypted only", label);
+                } else {
+                    toast("%s: agreeing a key...", label);
+                }
+            }
+            break;
         case BSP_INPUT_NAVIGATION_KEY_F3:  // remove this node
             if (model.node_index >= 0 && model.node_index < count) {
                 model_node_remove(mesh, order[model.node_index]);
@@ -881,24 +952,66 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
     }
 }
 
-static void handle_picker_key(bsp_input_navigation_key_t key) {
+// The picker is one list: channels first, then contacts. An index past the
+// channel count is a contact, which is what makes "send to" a single choice
+// rather than two settings that can disagree.
+static void picker_choose(void) {
     mesh_state_t* mesh = model_active(&model);
+
+    if (model.picker_index < mesh->channel_count) {
+        model_target_set_channel(mesh, model.picker_index);
+        model.overlay = OVERLAY_NONE;
+        settings_save_prefs(&model);
+        toast("sending to %s", mesh->channels[mesh->input_channel].name);
+        return;
+    }
+
+    int order[MAX_NODES];
+    int contacts = model_nodes_by_recency(mesh, order, MAX_NODES);
+    int index    = model.picker_index - mesh->channel_count;
+    if (index < 0 || index >= contacts) return;
+
+    node_t* node = &mesh->nodes[order[index]];
+    model_target_set_contact(mesh, model.active, node);
+    model.overlay = OVERLAY_NONE;
+    settings_save_prefs(&model);
+
+    char label[NODE_NAME_MAX + 1];
+    model_node_label(node, model.active, label, sizeof(label));
+    if (node->has_secret) {
+        toast("messaging %s", label);
+    } else if (model.active == MESH_MT) {
+        // Worth saying out loud: the message will go out under the channel key,
+        // so everyone on the channel can read it.
+        toast("%s: no key, channel-encrypted only", label);
+    } else {
+        toast("%s: agreeing a key...", label);
+    }
+}
+
+static void handle_picker_key(bsp_input_navigation_key_t key) {
+    mesh_state_t* mesh  = model_active(&model);
+    int           count = ui_picker_count(&model);
+    if (count < 1) count = 1;
 
     switch (key) {
         case BSP_INPUT_NAVIGATION_KEY_UP:
-            model.picker_index = (model.picker_index - 1 + mesh->channel_count) % mesh->channel_count;
+            model.picker_index = (model.picker_index - 1 + count) % count;
             break;
         case BSP_INPUT_NAVIGATION_KEY_DOWN:
-            model.picker_index = (model.picker_index + 1) % mesh->channel_count;
+            model.picker_index = (model.picker_index + 1) % count;
             break;
-        case BSP_INPUT_NAVIGATION_KEY_RETURN:
-            mesh->input_channel = model.picker_index;
-            model.overlay       = OVERLAY_NONE;
-            settings_save_prefs(&model);
-            toast("sending to %s", mesh->channels[mesh->input_channel].name);
-            break;
+        case BSP_INPUT_NAVIGATION_KEY_RETURN: picker_choose(); break;
         case BSP_INPUT_NAVIGATION_KEY_F2: editor_open(true, -1); break;
-        case BSP_INPUT_NAVIGATION_KEY_F3: editor_open(false, model.picker_index); break;
+        case BSP_INPUT_NAVIGATION_KEY_F3:
+            // Only channels are editable; a contact is something we heard, not
+            // something configured.
+            if (model.picker_index < mesh->channel_count) {
+                editor_open(false, model.picker_index);
+            } else {
+                toast("contacts are edited from the nodes view");
+            }
+            break;
         case BSP_INPUT_NAVIGATION_KEY_ESC:
         case BSP_INPUT_NAVIGATION_KEY_F1:
         case BSP_INPUT_NAVIGATION_KEY_F6: model.overlay = OVERLAY_NONE; break;
@@ -1080,6 +1193,8 @@ void app_main(void) {
     // because their own channels will already have been stored.
     settings_apply_default_channels(&model);
 
+    if (!crypto_jobs_init()) ESP_LOGE(TAG, "public-key work will not run");
+
     for (int i = 0; i < MESH_COUNT; i++) {
         if (!nets[i]->init()) ESP_LOGE(TAG, "%s stack init failed", nets[i]->name);
         prepare_channels((mesh_id_t)i);
@@ -1109,6 +1224,10 @@ void app_main(void) {
         if (!settings_load_identity_keypair(&model.identity, ed25519_keypair)) {
             ESP_LOGE(TAG, "no MeshCore identity; adverts disabled");
         }
+        // Meshtastic's end-to-end key is a separate pair on a separate curve.
+        // Cheap by comparison, and independent: failing to load one does not
+        // stop the other network working.
+        settings_load_mt_keypair(&model.identity, x25519_keypair, x25519_public_from_private);
     } else {
         ESP_LOGE(TAG, "ed25519 SELF-TEST FAILED - signing disabled");
         ui_boot_line("ed25519 self-test FAILED");
@@ -1147,7 +1266,7 @@ void app_main(void) {
         }
         // Lower still, and a generous stack: the big-integer arithmetic behind
         // Ed25519 is not frugal with it.
-        if (xTaskCreate(verify_worker, "mm_verify", 8192, NULL, 3, NULL) != pdPASS) {
+        if (xTaskCreate(crypto_worker, "mm_crypto", 8192, NULL, 3, NULL) != pdPASS) {
             ESP_LOGE(TAG, "verification worker could not be started");
         }
     } else {
@@ -1212,7 +1331,8 @@ void app_main(void) {
 
         if (radio_poll()) dirty = true;
         if (drain_tx_events()) dirty = true;
-        if (drain_verifications()) dirty = true;
+        if (drain_crypto()) dirty = true;
+        forward_acks();
         if (poll_power()) dirty = true;
         if (housekeeping()) dirty = true;
         if (tx_settle()) dirty = true;

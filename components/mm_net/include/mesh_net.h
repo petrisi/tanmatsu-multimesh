@@ -46,7 +46,9 @@ typedef struct mesh_net_s {
     // credits it to the originating message, which is what the delivery
     // indicator counts. That match has to happen here because only the stack
     // knows what identifies one of its frames.
-    bool (*handle)(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh);
+    // `identity` is needed to recognise traffic addressed to us: both networks
+    // now carry direct messages, and only our own keys can pick them out.
+    bool (*handle)(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh, const identity_t* identity);
 
     // Build a transmittable frame for `text` on `channel`, attributed to
     // `identity`. `msg_seq` is the message this frame belongs to, so repeats
@@ -56,6 +58,14 @@ typedef struct mesh_net_s {
     // has no usable key.
     uint8_t (*encode)(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, const char* text,
                       uint32_t msg_seq, uint8_t* out, size_t out_max);
+
+    // Build a direct message to one contact. `msg` is the row it belongs to, so
+    // the stack can record what would acknowledge it -- the two networks prove
+    // delivery differently and only the stack knows how.
+    //
+    // Returns the frame length, or 0 when the contact has no usable key.
+    uint8_t (*encode_dm)(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, const char* text,
+                         message_t* msg, uint8_t* out, size_t out_max);
 
     // Build the frame that announces us to the network. Both networks have the
     // concept and neither builds it the same way -- Meshtastic sends an

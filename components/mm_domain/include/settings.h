@@ -56,3 +56,12 @@ void settings_derive_node_id(identity_t* identity);
 // component keeps no dependency on the crypto, which lives above it.
 bool settings_load_identity_keypair(identity_t* identity,
                                     bool (*derive)(uint8_t pub[32], uint8_t priv[64], const uint8_t seed[32]));
+
+// The same thing for Meshtastic, which needs a Curve25519 pair of its own for
+// end-to-end direct messages. Stored as the private key rather than a seed,
+// because that is what the curve generates and what upstream clients store.
+//
+// `generate` is used on first run, `derive` on every boot afterwards; both are
+// passed in so this component keeps no dependency on the crypto.
+bool settings_load_mt_keypair(identity_t* identity, bool (*generate)(uint8_t pub[32], uint8_t priv[32]),
+                              bool (*derive)(uint8_t pub[32], const uint8_t priv[32]));

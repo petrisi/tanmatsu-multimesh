@@ -33,3 +33,7 @@ void ui_set_anchor(app_model_t* model, int line_index);
 // Line index of a message's first row, or -1 if it is not in the ring. Used to
 // keep the selection on screen.
 int ui_line_of_seq(const app_model_t* model, uint32_t seq);
+
+// Rows in the send-to picker: channels followed by contacts. The event loop
+// needs it to wrap the selection, and the split point is the channel count.
+int ui_picker_count(const app_model_t* model);

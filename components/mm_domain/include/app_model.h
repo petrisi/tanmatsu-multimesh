@@ -106,8 +106,14 @@ typedef struct {
     bool       outgoing;
     tx_state_t tx;
     uint8_t    repeats;    // repeaters heard repeating this message
-    bool       acked;      // explicit ack (DMs; not in this phase)
     uint32_t   tx_tick_ms;  // when the current tx state was entered
+
+    // Direct messages. `peer` is the other end whichever way it went, so the
+    // column reads the same for both halves of a conversation.
+    bool     dm;
+    char     peer[SENDER_MAX];
+    bool     acked;      // the recipient proved it decrypted this
+    uint32_t expected_ack;  // MeshCore: the hash that would prove it
 } message_t;
 
 // Receive counters, kept per network. `detail` is a short free-form breakdown
@@ -159,6 +165,13 @@ typedef struct {
     uint8_t public_key[NODE_KEY_LEN];  // Meshtastic: Curve25519 from NodeInfo
     bool    has_public_key;
 
+    // The key direct messages with this node are encrypted under. Derived once
+    // -- it costs a scalar multiplication -- and kept, because it depends only
+    // on two permanent identities and so never changes.
+    uint8_t shared_secret[NODE_KEY_LEN];
+    bool    has_secret;
+    bool    secret_pending;  // queued for derivation; not persisted as such
+
     int     rssi_dbm;  // of the last packet heard from it
     int     snr_db_x4;
     uint8_t hops;
@@ -174,7 +187,14 @@ typedef struct {
 
     channel_t channels[MAX_CHANNELS];
     int       channel_count;
-    int       input_channel;  // where the composer sends
+    int       input_channel;  // where the composer sends when not in a conversation
+
+    // A conversation, when one is selected. Identified by who rather than by
+    // index: the node table is pruned and reordered, and a stale index would
+    // quietly retarget a message at whoever moved into the slot.
+    bool     target_contact;
+    uint32_t target_num;               // Meshtastic
+    uint8_t  target_key[NODE_KEY_LEN];  // MeshCore
 
     message_t messages[MAX_MESSAGES];
     int       head;
@@ -247,6 +267,14 @@ typedef struct {
     uint8_t public_key[32];
     uint8_t private_key[64];  // derived from the stored seed, never persisted
     bool    has_keypair;
+
+    // Meshtastic's end-to-end key is a *different* key pair on a different
+    // curve, published in NodeInfo. It cannot be shared with the MeshCore one:
+    // that is a signing key, this is an agreement key, and the two networks
+    // derive their secrets differently even before that.
+    uint8_t mt_public_key[32];
+    uint8_t mt_private_key[32];
+    bool    has_mt_keypair;
 } identity_t;
 
 // Transmitting without an identity would put an anonymous message on a public
@@ -327,6 +355,23 @@ const message_t* model_message_by_seq(const mesh_state_t* mesh, int32_t seq);
 // NULL only when the table is full of entries newer than this one.
 node_t* model_node_touch_mt(mesh_state_t* mesh, uint32_t node_num);
 node_t* model_node_touch_mc(mesh_state_t* mesh, const uint8_t key[NODE_KEY_LEN]);
+
+// Look up without creating or stamping. NULL when the node is not known.
+node_t* model_node_find_mt(mesh_state_t* mesh, uint32_t node_num);
+node_t* model_node_find_mc(mesh_state_t* mesh, const uint8_t key[NODE_KEY_LEN]);
+
+// The contact the composer is aimed at, or NULL when it is aimed at a channel
+// or the contact has since been pruned. Callers must handle NULL: a
+// conversation can outlive the node entry behind it.
+node_t* model_target_node(mesh_state_t* mesh, mesh_id_t id);
+
+// Point the composer at a contact, or back at a channel.
+void model_target_set_contact(mesh_state_t* mesh, mesh_id_t id, const node_t* node);
+void model_target_set_channel(mesh_state_t* mesh, int channel);
+
+// How the target should be labelled in the status bar and the message column.
+// Falls back through name, short name and key or number, like the nodes list.
+void model_node_label(const node_t* node, mesh_id_t id, char* out, size_t out_size);
 
 // Drop entries we have not heard from in a long time. Nodes that never told us
 // their name expire far sooner: an unnamed entry is little more than evidence

@@ -6,13 +6,11 @@
 #include <string.h>
 #include <time.h>
 #include "base64.h"
+#include "crypto_jobs.h"
 #include "dedup.h"
 #include "ed25519.h"
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 #include "mesh_net.h"
-#include "mesh_verify.h"
 #include "meshcore_crypto.h"
 #include "meshcore_wire.h"
 #include "radio_cfg.h"
@@ -82,78 +80,55 @@ static bool credit_repeat(mesh_state_t* mesh, const uint8_t* payload, uint8_t pa
     return false;
 }
 
-// --- advert signature verification ---------------------------------------
+// --- acknowledgements ----------------------------------------------------
 //
-// See mesh_verify.h for why this is not done inline.
+// Reading a direct message obliges us to acknowledge it, but receive runs on the
+// event loop and transmitting blocks. So the frame is built here and parked for
+// the loop to pick up and queue, the same way verification results travel.
 
-#define VERIFY_QUEUE_DEPTH 4
+#define MAX_PENDING_ACKS 4
 
 typedef struct {
-    uint8_t pub_key[MC_PUB_KEY_SIZE];
-    uint8_t signature[MC_SIGNATURE_SIZE];
-    uint8_t signed_len;
-    uint8_t signed_bytes[MC_MAX_PAYLOAD_SIZE];
-} verify_job_t;
+    bool    active;
+    uint8_t frame[MC_MAX_PAYLOAD_SIZE + 8];
+    uint8_t length;
+} pending_ack_t;
 
-static QueueHandle_t verify_jobs;
-static QueueHandle_t verify_results;
+static pending_ack_t acks[MAX_PENDING_ACKS];
 
-// Queue an advert for checking. False when it was dropped -- a full queue means
-// adverts are arriving faster than we can verify them, and receive must not
-// block for a verdict. The caller leaves the node unchecked so the next advert
-// from it tries again.
-static bool queue_verification(const uint8_t* payload, uint8_t payload_len, const mc_advert_t* advert) {
-    if (verify_jobs == NULL) return false;
+static void queue_ack(const uint8_t hash[MC_ACK_HASH_SIZE]) {
+    uint8_t payload[MC_ACK_HASH_SIZE];
+    uint8_t payload_len = mc_ack_build(hash, payload, sizeof(payload));
+    if (payload_len == 0) return;
 
-    verify_job_t job;
-    job.signed_len = mc_advert_signed_region(payload, payload_len, job.signed_bytes, sizeof(job.signed_bytes));
-    if (job.signed_len == 0) return false;
-
-    memcpy(job.pub_key, advert->pub_key, sizeof(job.pub_key));
-    memcpy(job.signature, advert->signature, sizeof(job.signature));
-
-    if (xQueueSend(verify_jobs, &job, 0) != pdTRUE) {
-        ESP_LOGD(TAG, "verification backlog, advert unchecked");
-        return false;
+    for (int i = 0; i < MAX_PENDING_ACKS; i++) {
+        if (acks[i].active) continue;
+        // Flooded rather than routed back along the path: we do not track return
+        // paths yet, and an unacknowledged message reads as a delivery failure.
+        acks[i].length = mc_packet_build(MC_PAYLOAD_ACK, MC_ROUTE_FLOOD, payload, payload_len, acks[i].frame,
+                                         sizeof(acks[i].frame));
+        acks[i].active = acks[i].length > 0;
+        return;
     }
-    return true;
+    ESP_LOGW(TAG, "no slot for an acknowledgement; the sender will retry");
 }
 
-bool mc_verify_run_one(uint32_t wait_ms) {
-    if (verify_jobs == NULL || verify_results == NULL) return false;
-
-    verify_job_t job;
-    if (xQueueReceive(verify_jobs, &job, pdMS_TO_TICKS(wait_ms)) != pdTRUE) return false;
-
-    mc_verify_result_t result;
-    memcpy(result.pub_key, job.pub_key, sizeof(result.pub_key));
-    result.valid = ed25519_verify(job.signature, job.signed_bytes, job.signed_len, job.pub_key);
-
-    if (!result.valid) {
-        ESP_LOGW(TAG, "advert signature failed for %02x%02x%02x%02x", job.pub_key[0], job.pub_key[1], job.pub_key[2],
-                 job.pub_key[3]);
+bool mc_take_pending_ack(uint8_t* out, size_t out_max, uint8_t* out_len) {
+    if (out == NULL || out_len == NULL) return false;
+    for (int i = 0; i < MAX_PENDING_ACKS; i++) {
+        if (!acks[i].active || acks[i].length > out_max) continue;
+        memcpy(out, acks[i].frame, acks[i].length);
+        *out_len       = acks[i].length;
+        acks[i].active = false;
+        return true;
     }
-
-    xQueueSend(verify_results, &result, portMAX_DELAY);
-    return true;
-}
-
-bool mc_verify_take_result(mc_verify_result_t* out) {
-    if (verify_results == NULL || out == NULL) return false;
-    return xQueueReceive(verify_results, out, 0) == pdTRUE;
+    return false;
 }
 
 static bool meshcore_init(void) {
     dedup_reset(&seen);
     memset(pending, 0, sizeof(pending));
-
-    if (verify_jobs == NULL) verify_jobs = xQueueCreate(VERIFY_QUEUE_DEPTH, sizeof(verify_job_t));
-    if (verify_results == NULL) verify_results = xQueueCreate(VERIFY_QUEUE_DEPTH, sizeof(mc_verify_result_t));
-    if (verify_jobs == NULL || verify_results == NULL) {
-        ESP_LOGE(TAG, "verification queues could not be allocated");
-        return false;
-    }
-
+    memset(acks, 0, sizeof(acks));
     return mc_crypto_init();
 }
 
@@ -201,7 +176,108 @@ static void detail(mesh_state_t* mesh) {
              (unsigned long)grp_txt, (unsigned long)mesh->stats.duplicates);
 }
 
-static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh) {
+// Ask for the shared secret with a node, once. Cheap to call repeatedly: it
+// does nothing when the secret is already known or already queued.
+static void want_secret(node_t* node, const identity_t* identity) {
+    if (node == NULL || node->has_secret || node->secret_pending) return;
+    if (!identity->has_keypair || !node->has_public_key) return;
+
+    if (crypto_queue_mc_secret(node->key, identity->private_key)) node->secret_pending = true;
+}
+
+// A direct message addressed to us. The one-byte sender hash narrows the field;
+// the MAC is what actually identifies the sender, so every contact sharing that
+// byte gets a try.
+static bool handle_datagram(const mc_packet_t* packet, mesh_state_t* mesh, const identity_t* identity,
+                            const lora_protocol_lora_packet_t* pkt) {
+    if (!identity->has_keypair) return false;
+
+    mc_datagram_t datagram;
+    if (!mc_datagram_parse(packet->payload, packet->payload_length, &datagram)) {
+        mesh->stats.packets_bad++;
+        return false;
+    }
+    if (datagram.dest_hash != identity->public_key[0]) return false;  // not for us
+
+    for (int i = 0; i < MAX_NODES; i++) {
+        node_t* node = &mesh->nodes[i];
+        if (!node->used || node->key[0] != datagram.src_hash) continue;
+
+        if (!node->has_secret) {
+            // We know of this node but have never agreed a key with it. Start
+            // that now; this message is lost, but the sender will retry and the
+            // next one will read.
+            want_secret(node, identity);
+            continue;
+        }
+
+        mc_dm_msg_t decoded;
+        if (!mc_dm_decrypt(node->shared_secret, datagram.mac, datagram.cipher, datagram.cipher_length, &decoded)) {
+            continue;
+        }
+        // Only plain text is displayable; the CLI and signed forms are other
+        // features of upstream that we do not implement.
+        if (decoded.text_type != 0) return false;
+
+        node->last_heard = (uint32_t)time(NULL);
+
+        char who[SENDER_MAX];
+        model_node_label(node, MESH_MC, who, sizeof(who));
+
+        message_t* msg = model_push(mesh, (uint8_t)mesh->input_channel, who, node->named, decoded.text, false);
+        msg->dm        = true;
+        snprintf(msg->peer, sizeof(msg->peer), "%s", who);
+        msg->sender_timestamp = decoded.timestamp;
+        msg->rssi_dbm         = -(int)pkt->stats.rssi_pkt_raw / 2;
+        msg->snr_db_x4        = pkt->stats.snr_pkt_raw;
+        msg->hops             = packet->hop_count;
+        msg->path_len = packet->path_length > sizeof(msg->path) ? (uint8_t)sizeof(msg->path) : packet->path_length;
+        memcpy(msg->path, packet->path, msg->path_len);
+
+        // Acknowledge it. The hash is over the plaintext and the *sender's* key,
+        // so returning it proves we read the message rather than merely heard
+        // the frame -- which is the whole point of it.
+        uint8_t plain[MC_MAX_PAYLOAD_SIZE];
+        size_t  plain_len = mc_dm_frame_plaintext(decoded.timestamp, decoded.attempt, decoded.text, plain,
+                                                  sizeof(plain), NULL);
+        if (plain_len > 0) {
+            uint8_t hash[MC_ACK_HASH_SIZE];
+            if (mc_dm_ack_hash(hash, plain, decoded.signed_len, node->key)) queue_ack(hash);
+        }
+
+        mesh->stats.messages++;
+        ESP_LOGI(TAG, "dm from %s: %s", who, decoded.text);
+        return true;
+    }
+
+    // Addressed to us but from nobody we hold a key for.
+    mesh->stats.not_our_channel++;
+    return false;
+}
+
+// An acknowledgement for one of our direct messages. Matched on the hash the
+// sender computed when it built the message.
+static bool handle_ack(const mc_packet_t* packet, mesh_state_t* mesh) {
+    uint8_t hash[MC_ACK_HASH_SIZE];
+    if (!mc_ack_parse(packet->payload, packet->payload_length, hash)) return false;
+
+    uint32_t value = (uint32_t)hash[0] | ((uint32_t)hash[1] << 8) | ((uint32_t)hash[2] << 16) |
+                     ((uint32_t)hash[3] << 24);
+
+    for (int i = 0; i < mesh->count; i++) {
+        message_t* msg = (message_t*)model_message_at(mesh, i);
+        if (msg == NULL || !msg->used || !msg->outgoing || !msg->dm) continue;
+        if (msg->expected_ack != value || msg->acked) continue;
+
+        msg->acked = true;
+        msg->tx    = TX_CONFIRMED;
+        ESP_LOGI(TAG, "dm to %s acknowledged", msg->peer);
+        return true;
+    }
+    return false;
+}
+
+static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh, const identity_t* identity) {
     mesh->stats.packets_total++;
 
     mc_packet_t packet;
@@ -250,10 +326,18 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
                 // once cannot later turn out to be someone else. A previous
                 // failure is retried, since it may have been a corrupt frame.
                 if (node->verified != NODE_VERIFY_VALID && node->verified != NODE_VERIFY_PENDING) {
-                    if (queue_verification(packet.payload, packet.payload_length, &advert)) {
+                    uint8_t region[MC_MAX_PAYLOAD_SIZE];
+                    uint8_t region_len = mc_advert_signed_region(packet.payload, packet.payload_length, region,
+                                                                 sizeof(region));
+                    if (region_len > 0 &&
+                        crypto_queue_mc_verify(advert.pub_key, advert.signature, region, region_len)) {
                         node->verified = NODE_VERIFY_PENDING;
                     }
                 }
+
+                // An advert is where a MeshCore key comes from, so it is also
+                // the moment a conversation with this node becomes possible.
+                want_secret(node, identity);
 
                 ESP_LOGI(TAG, "advert %s (%s)", advert.has_name ? advert.name : "unnamed",
                          mc_role_name(advert.role));
@@ -261,6 +345,18 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
         }
         detail(mesh);
         return false;
+    }
+
+    if (packet.type == MC_PAYLOAD_TXT_MSG) {
+        bool shown = handle_datagram(&packet, mesh, identity, pkt);
+        detail(mesh);
+        return shown;
+    }
+
+    if (packet.type == MC_PAYLOAD_ACK) {
+        bool matched = handle_ack(&packet, mesh);
+        detail(mesh);
+        return matched;
     }
 
     if (packet.type != MC_PAYLOAD_GRP_TXT) {
@@ -351,6 +447,43 @@ static uint8_t meshcore_encode(mesh_state_t* mesh, uint8_t channel, const identi
     return len;
 }
 
+static uint8_t meshcore_encode_dm(mesh_state_t* mesh, const identity_t* identity, const node_t* peer,
+                                  const char* text, message_t* msg, uint8_t* out, size_t out_max) {
+    (void)mesh;
+    if (!identity->has_keypair || peer == NULL || !peer->has_secret) return 0;
+
+    uint8_t plain[MC_MAX_PAYLOAD_SIZE];
+    uint8_t unpadded = 0;
+    // Attempt zero: resends are not implemented, and the counter exists only to
+    // make a retry hash differently from the original.
+    size_t padded = mc_dm_frame_plaintext((uint32_t)time(NULL), 0, text, plain, sizeof(plain), &unpadded);
+    if (padded == 0) return 0;
+
+    // What the recipient will send back if it reads this. Computed over our own
+    // key, because that is the key it will hash on its side.
+    uint8_t hash[MC_ACK_HASH_SIZE];
+    if (!mc_dm_ack_hash(hash, plain, unpadded, identity->public_key)) return 0;
+
+    uint8_t cipher[MC_MAX_PAYLOAD_SIZE];
+    uint8_t mac[32];
+    if (!mc_dm_encrypt(peer->shared_secret, plain, padded, cipher, mac)) return 0;
+
+    uint8_t payload[MC_MAX_PAYLOAD_SIZE];
+    uint8_t payload_len = mc_datagram_build(peer->key[0], identity->public_key[0], mac, cipher, (uint8_t)padded,
+                                            payload, sizeof(payload));
+    if (payload_len == 0) return 0;
+
+    uint8_t len = mc_packet_build(MC_PAYLOAD_TXT_MSG, MC_ROUTE_FLOOD, payload, payload_len, out, out_max);
+    if (len == 0) return 0;
+
+    if (msg) {
+        msg->expected_ack = (uint32_t)hash[0] | ((uint32_t)hash[1] << 8) | ((uint32_t)hash[2] << 16) |
+                            ((uint32_t)hash[3] << 24);
+        track_transmission(payload, payload_len, msg->seq);
+    }
+    return len;
+}
+
 // An advert is the whole of MeshCore's identity system: it binds a name and a
 // role to a public key, and the signature is what makes that binding worth
 // anything. It is not scoped to a channel -- everyone on the frequency can read
@@ -412,5 +545,6 @@ const mesh_net_t mesh_net_meshcore = {
     .local_sender    = meshcore_local_sender,
     .handle          = meshcore_handle,
     .encode          = meshcore_encode,
+    .encode_dm       = meshcore_encode_dm,
     .encode_advert   = meshcore_encode_advert,
 };

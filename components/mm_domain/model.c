@@ -119,6 +119,58 @@ node_t* model_node_touch_mc(mesh_state_t* mesh, const uint8_t key[NODE_KEY_LEN])
     return node;
 }
 
+node_t* model_node_find_mt(mesh_state_t* mesh, uint32_t node_num) {
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (mesh->nodes[i].used && mesh->nodes[i].node_num == node_num) return &mesh->nodes[i];
+    }
+    return NULL;
+}
+
+node_t* model_node_find_mc(mesh_state_t* mesh, const uint8_t key[NODE_KEY_LEN]) {
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (mesh->nodes[i].used && memcmp(mesh->nodes[i].key, key, NODE_KEY_LEN) == 0) return &mesh->nodes[i];
+    }
+    return NULL;
+}
+
+node_t* model_target_node(mesh_state_t* mesh, mesh_id_t id) {
+    if (!mesh->target_contact) return NULL;
+    return id == MESH_MT ? model_node_find_mt(mesh, mesh->target_num) : model_node_find_mc(mesh, mesh->target_key);
+}
+
+void model_target_set_contact(mesh_state_t* mesh, mesh_id_t id, const node_t* node) {
+    if (node == NULL) return;
+    mesh->target_contact = true;
+    if (id == MESH_MT) {
+        mesh->target_num = node->node_num;
+        memset(mesh->target_key, 0, NODE_KEY_LEN);
+    } else {
+        memcpy(mesh->target_key, node->key, NODE_KEY_LEN);
+        mesh->target_num = 0;
+    }
+}
+
+void model_target_set_channel(mesh_state_t* mesh, int channel) {
+    mesh->target_contact = false;
+    if (channel >= 0 && channel < mesh->channel_count) mesh->input_channel = channel;
+}
+
+void model_node_label(const node_t* node, mesh_id_t id, char* out, size_t out_size) {
+    if (node == NULL || out == NULL || out_size == 0) return;
+
+    if (node->long_name[0]) {
+        snprintf(out, out_size, "%s", node->long_name);
+    } else if (node->short_name[0]) {
+        snprintf(out, out_size, "%s", node->short_name);
+    } else if (id == MESH_MT) {
+        snprintf(out, out_size, "!%08lx", (unsigned long)node->node_num);
+    } else {
+        // MeshCore identifies nodes by public key; a prefix is what other
+        // clients show too.
+        snprintf(out, out_size, "%02x%02x%02x%02x", node->key[0], node->key[1], node->key[2], node->key[3]);
+    }
+}
+
 int model_nodes_prune(mesh_state_t* mesh, uint32_t now) {
     int removed = 0;
     for (int i = 0; i < MAX_NODES; i++) {
