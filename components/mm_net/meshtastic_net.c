@@ -22,6 +22,7 @@
 #include "mesh_net.h"
 #include "meshtastic_crypto.h"
 #include "meshtastic_wire.h"
+#include "session_log.h"
 
 static const char TAG[] = "net_mt";
 
@@ -102,7 +103,9 @@ static bool credit_repeat(mesh_state_t* mesh, uint32_t from, uint32_t id) {
 
 static uint8_t encode_to_node(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, uint32_t portnum,
                               const uint8_t* body, size_t body_len, uint32_t request_id, bool want_ack,
-                              uint32_t msg_seq, uint8_t* out, size_t out_max);
+                              bool want_response, uint32_t msg_seq, uint8_t* out, size_t out_max);
+static uint8_t encode_nodeinfo(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, bool ask,
+                               uint8_t* out, size_t out_max);
 
 // --- acknowledgements ----------------------------------------------------
 //
@@ -119,6 +122,17 @@ typedef struct {
 
 static pending_ack_t acks[MAX_PENDING_ACKS];
 
+// The slots are just deferred outgoing frames: acknowledgements, and replies to
+// an information request. Anything the receive path decides to send but cannot,
+// because it runs on the loop that must not block.
+static pending_ack_t* free_ack_slot(void) {
+    for (int i = 0; i < MAX_PENDING_ACKS; i++) {
+        if (!acks[i].active) return &acks[i];
+    }
+    ESP_LOGW(TAG, "no free slot for a deferred reply");
+    return NULL;
+}
+
 static void queue_ack(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, uint32_t request_id) {
     uint8_t routing[MT_ROUTING_ACK_LEN];
     size_t  routing_len = mt_routing_ack_encode(routing, sizeof(routing));
@@ -131,7 +145,7 @@ static void queue_ack(mesh_state_t* mesh, const identity_t* identity, const node
         // we hold their key, channel otherwise. It carries no want_ack of its
         // own -- acknowledging an acknowledgement never terminates.
         acks[i].length = encode_to_node(mesh, identity, peer, MT_PORTNUM_ROUTING, routing, routing_len, request_id,
-                                        false, UINT32_MAX, acks[i].frame, sizeof(acks[i].frame));
+                                        false, false, UINT32_MAX, acks[i].frame, sizeof(acks[i].frame));
         acks[i].active = acks[i].length > 0;
         return;
     }
@@ -285,6 +299,22 @@ static bool deliver(const mt_data_t* data, const mt_packet_t* packet, mesh_state
             }
             node->named = user.long_name[0] != '\0' || user.short_name[0] != '\0';
             ESP_LOGI(TAG, "nodeinfo %08lx = %s (%s)", (unsigned long)packet->from, user.long_name, user.short_name);
+            session_log("nodeinfo.rx from=%08lx name=\"%s\" short=\"%s\" haskey=%u wantresp=%u",
+                        (unsigned long)packet->from, user.long_name, user.short_name, user.has_public_key ? 1u : 0u,
+                        data->want_response ? 1u : 0u);
+
+            // Answer a request with our own, which is the other half of the
+            // exchange: without it the asker never learns our key and can never
+            // send us anything private. Only when addressed to us -- a broadcast
+            // asking everyone would set the whole mesh talking at once.
+            if (data->want_response && packet->to == identity->node_num) {
+                pending_ack_t* slot = free_ack_slot();
+                if (slot) {
+                    slot->length = encode_nodeinfo(mesh, identity, node, false, slot->frame, sizeof(slot->frame));
+                    slot->active = slot->length > 0;
+                    session_log("nodeinfo.tx to=%08lx reason=request", (unsigned long)packet->from);
+                }
+            }
         }
         other_ports++;
         return false;
@@ -437,7 +467,7 @@ static uint8_t encode_frame(mesh_state_t* mesh, uint8_t channel, const identity_
     if (!ch->ready) return 0;
 
     uint8_t payload[MT_MAX_PAYLOAD_SIZE];
-    size_t  payload_len = mt_data_encode(portnum, body, body_len, 0, payload, sizeof(payload));
+    size_t  payload_len = mt_data_encode(portnum, body, body_len, 0, false, payload, sizeof(payload));
     if (payload_len == 0) return 0;
 
     // The packet id is half the AES-CTR nonce. Reusing one under the same
@@ -475,12 +505,12 @@ static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const iden
 // which happened -- silently sending something weaker than the user expects
 // would be the worse failure.
 static uint8_t encode_to_node(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, uint32_t portnum,
-                              const uint8_t* body, size_t body_len, uint32_t request_id, bool want_ack,
+                              const uint8_t* body, size_t body_len, uint32_t request_id, bool want_ack, bool want_response,
                               uint32_t msg_seq, uint8_t* out, size_t out_max) {
     if (peer == NULL || peer->node_num == 0) return 0;
 
     uint8_t payload[MT_MAX_PAYLOAD_SIZE];
-    size_t  payload_len = mt_data_encode(portnum, body, body_len, request_id, payload, sizeof(payload));
+    size_t  payload_len = mt_data_encode(portnum, body, body_len, request_id, want_response, payload, sizeof(payload));
     if (payload_len == 0) return 0;
 
     uint32_t id = esp_random();
@@ -524,13 +554,46 @@ static uint8_t encode_to_node(mesh_state_t* mesh, const identity_t* identity, co
     return len;
 }
 
+// Build our NodeInfo addressed to one node. `ask` sets want_response, which is
+// what makes this an exchange rather than an announcement.
+//
+// This is Meshtastic's key exchange, and the whole of it. NodeInfo is one of the
+// port numbers upstream excludes from end-to-end encryption precisely so it can
+// travel before any key is known: it goes out under the channel key, carries our
+// public key, and asks for theirs back. Everything private between two nodes
+// depends on this having happened first.
+static uint8_t encode_nodeinfo(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, bool ask,
+                               uint8_t* out, size_t out_max) {
+    mt_user_t user = {0};
+    snprintf(user.id, sizeof(user.id), "%s", identity->node_id);
+    snprintf(user.long_name, sizeof(user.long_name), "%s", identity->name);
+    snprintf(user.short_name, sizeof(user.short_name), "%s", identity->short_name);
+    user.hw_model = MT_HW_PRIVATE;
+    if (identity->has_mt_keypair) {
+        memcpy(user.public_key, identity->mt_public_key, MT_PUBLIC_KEY_LEN);
+        user.has_public_key = true;
+    }
+
+    uint8_t body[MT_MAX_PAYLOAD_SIZE];
+    size_t  body_len = mt_user_encode(&user, body, sizeof(body));
+    if (body_len == 0) return 0;
+
+    return encode_to_node(mesh, identity, peer, MT_PORTNUM_NODEINFO, body, body_len, 0, false, ask, UINT32_MAX, out,
+                          out_max);
+}
+
+uint8_t mt_encode_info_exchange(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, uint8_t* out,
+                                size_t out_max) {
+    return encode_nodeinfo(mesh, identity, peer, true, out, out_max);
+}
+
 static uint8_t meshtastic_encode_dm(mesh_state_t* mesh, const identity_t* identity, const node_t* peer,
                                     const char* text, message_t* msg, uint8_t* out, size_t out_max) {
     // want_ack is what asks the recipient for a routing reply. Without it a
     // Meshtastic node stays silent and there is nothing to confirm delivery
     // with, which is why our direct messages never showed as acknowledged.
     uint8_t len = encode_to_node(mesh, identity, peer, MT_PORTNUM_TEXT_MESSAGE, (const uint8_t*)text, strlen(text), 0,
-                                 true, msg ? msg->seq : UINT32_MAX, out, out_max);
+                                 true, false, msg ? msg->seq : UINT32_MAX, out, out_max);
     if (len == 0) return 0;
 
     if (msg) {

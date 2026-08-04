@@ -28,6 +28,7 @@
 #include "meshcore_net.h"
 #include "meshcore_wire.h"
 #include "meshtastic_crypto.h"
+#include "meshtastic_net.h"
 #include "meshtastic_wire.h"
 #include "nodestore.h"
 #include "nvs_flash.h"
@@ -1106,6 +1107,27 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
                 snprintf(model.node_short_edit, sizeof(model.node_short_edit), "%s",
                          mesh->nodes[order[model.node_index]].short_name);
                 model.overlay = OVERLAY_NODE_SHORT;
+            }
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_F6:  // swap identities with this node
+            // Meshtastic will not send a private message to a node whose public
+            // key it does not hold -- current firmware refuses outright rather
+            // than falling back to anything weaker. This is how the key is
+            // obtained: our NodeInfo, addressed to them, asking for theirs.
+            if (model.active == MESH_MT && model.node_index >= 0 && model.node_index < count) {
+                node_t* node = &mesh->nodes[order[model.node_index]];
+
+                tx_request_t request = {.mesh = MESH_MT, .seq = UINT32_MAX};
+                request.length = mt_encode_info_exchange(mesh, &model.identity, node, request.frame,
+                                                         sizeof(request.frame));
+                if (request.length == 0) {
+                    toast("could not build the request");
+                } else if (xQueueSend(tx_requests, &request, 0) != pdTRUE) {
+                    toast("transmit queue full");
+                } else {
+                    session_log("nodeinfo.tx to=%08lx reason=manual", (unsigned long)node->node_num);
+                    toast(node->has_public_key ? "info sent - key already known" : "exchanging info...");
+                }
             }
             break;
         case BSP_INPUT_NAVIGATION_KEY_F5:  // forget the route to this node

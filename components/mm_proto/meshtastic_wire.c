@@ -82,6 +82,7 @@ bool mt_data_parse(const uint8_t* buf, size_t len, mt_data_t* out) {
                     out->portnum = (uint32_t)value;
                     saw_portnum  = true;
                 }
+                if (field == 3) out->want_response = value != 0;
                 break;
             }
             case 1:  // 64-bit
@@ -135,8 +136,8 @@ static size_t write_varint(uint8_t* out, size_t out_max, uint64_t value) {
     return n;
 }
 
-size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint32_t request_id, uint8_t* out,
-                      size_t out_max) {
+size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint32_t request_id,
+                      bool want_response, uint8_t* out, size_t out_max) {
     if (out == NULL || payload == NULL) return 0;
 
     size_t pos = 0;
@@ -161,6 +162,16 @@ size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_l
     memcpy(&out[pos], payload, payload_len);
     pos += payload_len;
 
+    // Field 3, wire type 0: want_response. Ascending tag order, and omitted when
+    // false like any proto3 default.
+    if (want_response) {
+        n = write_varint(&out[pos], out_max - pos, (3 << 3) | 0);
+        if (n == 0) return 0;
+        pos += n;
+        n = write_varint(&out[pos], out_max - pos, 1);
+        if (n == 0) return 0;
+        pos += n;
+    }
     // Field 6, wire type 5: request_id, a fixed32 rather than a varint. Written
     // last because it is the rarest, and omitted at zero like any proto3 default.
     if (request_id != 0) {

@@ -1306,7 +1306,7 @@ static void draw_node_detail(const app_model_t* model) {
     const node_t* node = &mesh->nodes[order[model->node_index]];
 
     float bw = 52 * CHAR_W;
-    float bh = LINE_H * 12 + 16;
+    float bh = LINE_H * 13 + 16;
     float bx, by;
     overlay_box(bw, bh, &bx, &by, mesh->accent, "Node");
 
@@ -1328,6 +1328,23 @@ static void draw_node_detail(const app_model_t* model) {
     } else {
         pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Role");
         pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, mc_role_name((mc_role_t)node->role));
+        y += LINE_H;
+    }
+
+    // Whether a private message to this node is even possible. Meshtastic
+    // encrypts them to the recipient's key and current firmware will not send
+    // one without it, so a missing key is not a detail -- it is the difference
+    // between the conversation working and being refused.
+    if (model->active == MESH_MT) {
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Key");
+        if (node->has_public_key) {
+            char hex[24];
+            snprintf(hex, sizeof(hex), "%02x%02x%02x%02x...", node->public_key[0], node->public_key[1],
+                     node->public_key[2], node->public_key[3]);
+            pax_draw_text(&fb, COL_OK, FONT, FONT_SIZE, vx, y, hex);
+        } else {
+            pax_draw_text(&fb, COL_WARN, FONT, FONT_SIZE, vx, y, "none - exchange info first");
+        }
         y += LINE_H;
     }
 
@@ -1437,9 +1454,13 @@ static void draw_node_detail(const app_model_t* model) {
     hx       = hint(hx, hy, CAP_TRI, "message");
     hx       = hint(hx, hy, CAP_CIRCLE, "short");
     hx       = hint(hx, hy, CAP_SQUARE, "remove");
-    // Only offered when there is one, both to keep the bar short and because
-    // the action means nothing otherwise.
-    if (model->active == MESH_MC && node->has_out_path) hint(hx, hy, CAP_CLOUD, "forget route");
+    // Only offered where they mean something, both to keep the bar short and
+    // because an action that does nothing is worse than an absent one.
+    if (model->active == MESH_MC && node->has_out_path) {
+        hint(hx, hy, CAP_CLOUD, "forget route");
+    } else if (model->active == MESH_MT) {
+        hint(hx, hy, CAP_DIAMOND, "exchange info");
+    }
 }
 
 static void draw_node_short(const app_model_t* model) {

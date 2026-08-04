@@ -65,6 +65,11 @@ typedef struct {
     // acknowledgement back to what it acknowledges.
     uint32_t request_id;
     bool     has_request_id;
+
+    // The sender is asking us to reply in kind. On NodeInfo this is the whole
+    // of Meshtastic's key exchange: answering it is how the other node learns
+    // our public key, and how we learn theirs.
+    bool want_response;
 } mt_data_t;
 
 // Minimal protobuf reader for the Data submessage: field 1 varint portnum,
@@ -78,8 +83,8 @@ bool mt_data_parse(const uint8_t* buf, size_t len, mt_data_t* out);
 // Encode a Data submessage. `request_id` of zero is omitted, which is what
 // proto3 does with a default value and what every other client expects.
 // Returns the encoded length, or 0 if it will not fit.
-size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint32_t request_id, uint8_t* out,
-                      size_t out_max);
+size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint32_t request_id,
+                      bool want_response, uint8_t* out, size_t out_max);
 
 // The Routing submessage that acknowledges a message: variant 3, error_reason,
 // set to NONE. Two bytes, but they have to be exactly these two -- an empty
