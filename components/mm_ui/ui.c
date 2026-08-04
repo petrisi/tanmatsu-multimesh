@@ -1414,8 +1414,15 @@ static void draw_node_detail(const app_model_t* model) {
                 col     = COL_OK;
                 break;
             case NODE_VERIFY_BAD:
-                verdict = "SIGNATURE INVALID - name not trustworthy";
-                col     = COL_BAD;
+                // Deliberately not "forged". A single failed check does not
+                // prove one: the frame's CRC is sixteen bits and not
+                // cryptographic, so a corrupted advert reaches us looking
+                // intact and fails the signature for an entirely innocent
+                // reason. That is what happened the one time this fired, and
+                // the next advert cleared it. Say what was observed and that
+                // it will be tried again, rather than accusing anyone.
+                verdict = "signature failed - rechecked on next advert";
+                col     = COL_WARN;
                 break;
             case NODE_VERIFY_PENDING: verdict = "checking signature..."; break;
             default: verdict = "signature not checked"; break;
