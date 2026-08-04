@@ -7,6 +7,7 @@ idf_component_register(
         mm_net
         mm_radio
         mm_ui
+        vendor
         badge-bsp
         tanmatsu-wifi
         nvs_flash

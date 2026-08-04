@@ -17,6 +17,7 @@
 #include "bsp/power.h"
 #include "bsp/rtc.h"
 #include "driver/gpio.h"
+#include "ed25519.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -1052,6 +1053,17 @@ void app_main(void) {
     for (int i = 0; i < MESH_COUNT; i++) {
         if (!nets[i]->init()) ESP_LOGE(TAG, "%s stack init failed", nets[i]->name);
         prepare_channels((mesh_id_t)i);
+    }
+
+    // Prove the signature code before anything relies on it. A wrong Ed25519
+    // produces signatures that look fine locally and are rejected by every
+    // peer, which is close to undiagnosable over the air.
+    if (ed25519_selftest()) {
+        ESP_LOGI(TAG, "ed25519 self-test passed");
+    } else {
+        ESP_LOGE(TAG, "ed25519 SELF-TEST FAILED - signing disabled");
+        ui_boot_line("ed25519 self-test FAILED");
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
 
     if (nodestore_init()) {
