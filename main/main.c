@@ -25,11 +25,13 @@
 #include "leds.h"
 #include "mesh_net.h"
 #include "mesh_verify.h"
+#include "meshtastic_crypto.h"
 #include "nodestore.h"
 #include "nvs_flash.h"
 #include "radio.h"
 #include "settings.h"
 #include "ui.h"
+#include "x25519.h"
 
 static const char TAG[] = "main";
 
@@ -1086,6 +1088,16 @@ void app_main(void) {
     // Prove the signature code before anything relies on it. A wrong Ed25519
     // produces signatures that look fine locally and are rejected by every
     // peer, which is close to undiagnosable over the air.
+    // Key agreement is checked first because it is cheap; the signature test
+    // below is the slow one.
+    if (x25519_selftest() && mt_pki_selftest()) {
+        ESP_LOGI(TAG, "key agreement self-test passed");
+    } else {
+        ESP_LOGE(TAG, "KEY AGREEMENT SELF-TEST FAILED - direct messages disabled");
+        ui_boot_line("key agreement self-test FAILED");
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+
     ui_boot_line("Checking signatures...");
     if (ed25519_selftest()) {
         ESP_LOGI(TAG, "ed25519 self-test passed");

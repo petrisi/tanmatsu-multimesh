@@ -58,3 +58,54 @@ bool mc_grp_encrypt(const uint8_t* key, size_t key_len, const uint8_t* plain, si
 //   timestamp[4] | text_type[1] | text[...]  zero-padded to a 16-byte multiple.
 // Returns the padded length, or 0 if the text does not fit.
 size_t mc_grp_frame_plaintext(uint32_t timestamp, const char* text, uint8_t* out, size_t out_max);
+
+// --- direct messages -----------------------------------------------------
+//
+// A DM is encrypted under the X25519 shared secret between the two identities
+// rather than a channel key. The construction is otherwise the channel one with
+// two differences that matter, both upstream's choices:
+//
+//   - the cipher takes the first 16 bytes of the secret, but the MAC is keyed
+//     with all 32, so the two lengths are not the same number;
+//   - the secret is the raw agreement output, with no KDF over it.
+
+#define MC_SHARED_SECRET_LEN 32
+
+// The shared secret with a peer, from our Ed25519 identity and theirs. Slow
+// enough (a scalar multiplication) that callers should cache the result rather
+// than derive it per packet.
+bool mc_shared_secret(uint8_t out[MC_SHARED_SECRET_LEN], const uint8_t our_private_key[64],
+                      const uint8_t their_public_key[MC_PUB_KEY_SIZE]);
+
+typedef struct {
+    uint32_t timestamp;   // the sender's clock
+    uint8_t  text_type;   // 0 is a plain message; others are CLI and signed forms
+    uint8_t  attempt;     // resend counter, low two bits of the flags byte
+    char     text[MC_MAX_PAYLOAD_SIZE];
+    // The bytes an acknowledgement is computed over: the unpadded plaintext.
+    // Kept because the padding is not part of it and cannot be recovered later.
+    uint8_t  signed_len;
+} mc_dm_msg_t;
+
+// Frame a direct message: timestamp[4] | flags[1] | text[...] NUL-terminated,
+// zero-padded to a cipher block. `attempt` occupies the low two bits of the
+// flags byte and exists to make a resend hash differently from the original.
+// Returns the padded length, or 0 if the text does not fit.
+size_t mc_dm_frame_plaintext(uint32_t timestamp, uint8_t attempt, const char* text, uint8_t* out, size_t out_max,
+                             uint8_t* out_unpadded_len);
+
+bool mc_dm_encrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t* plain, size_t padded_len,
+                   uint8_t* out_cipher, uint8_t out_mac[32]);
+
+// Verify the MAC, decrypt, and split. False without writing anything when the
+// MAC does not match -- which is also how the right contact is picked out, since
+// the one-byte sender hash on the wire is not unique.
+bool mc_dm_decrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t mac[MC_CIPHER_MAC_SIZE],
+                   const uint8_t* cipher, size_t cipher_len, mc_dm_msg_t* out);
+
+// The acknowledgement a message expects: SHA256(plaintext || sender_public_key)
+// truncated to four bytes, over the *unpadded* plaintext. Both ends compute it
+// over the sender's key, so a receiver proves it read the message rather than
+// merely heard the frame.
+bool mc_dm_ack_hash(uint8_t out[4], const uint8_t* plain, size_t unpadded_len,
+                    const uint8_t sender_public_key[MC_PUB_KEY_SIZE]);

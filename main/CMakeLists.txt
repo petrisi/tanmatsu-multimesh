@@ -3,6 +3,7 @@ idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
+        mm_crypto
         mm_domain
         mm_net
         mm_radio

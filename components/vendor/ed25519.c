@@ -440,6 +440,56 @@ done:
     return ok;
 }
 
+bool ed25519_pub_to_x25519(uint8_t out[32], const uint8_t public_key[ED25519_PUBLIC_LEN]) {
+    if (curve_init() != 0) return false;
+
+    uint8_t y_bytes[32];
+    memcpy(y_bytes, public_key, 32);
+    y_bytes[31] &= 0x7F;  // the top bit is the sign of x, not part of y
+
+    mbedtls_mpi y, num, den, u;
+    mbedtls_mpi_init(&y);
+    mbedtls_mpi_init(&num);
+    mbedtls_mpi_init(&den);
+    mbedtls_mpi_init(&u);
+    bool ok = false;
+
+    if (mpi_from_le(&y, y_bytes, 32) != 0) goto done;
+
+    // u = (1 + y) / (1 - y). The division is a modular inverse, which for a
+    // prime modulus is exponentiation by p-2 -- the same trick used elsewhere
+    // here, so there is only one inversion routine to be wrong about.
+    if (mbedtls_mpi_add_int(&num, &y, 1) != 0) goto done;
+    if (fe_mod(&num) != 0) goto done;
+    if (mbedtls_mpi_lset(&den, 1) != 0) goto done;
+    if (fe_sub(&den, &den, &y) != 0) goto done;
+
+    // y = 1 is the Edwards identity, which maps to the Montgomery point at
+    // infinity. It has no encoding, and a peer advertising it is not a peer.
+    if (mbedtls_mpi_cmp_int(&den, 0) == 0) goto done;
+
+    mbedtls_mpi exponent;
+    mbedtls_mpi_init(&exponent);
+    if (mbedtls_mpi_sub_int(&exponent, &curve.p, 2) == 0 && fe_pow(&den, &den, &exponent) == 0 &&
+        fe_mul(&u, &num, &den) == 0 && mpi_to_le(out, 32, &u) == 0) {
+        ok = true;
+    }
+    mbedtls_mpi_free(&exponent);
+
+done:
+    mbedtls_mpi_free(&y);
+    mbedtls_mpi_free(&num);
+    mbedtls_mpi_free(&den);
+    mbedtls_mpi_free(&u);
+    return ok;
+}
+
+void ed25519_priv_to_x25519(uint8_t out[32], const uint8_t private_key[ED25519_PRIVATE_LEN]) {
+    // The first half of the private key is already the clamped scalar, stored
+    // little-endian, which is exactly what X25519 takes.
+    memcpy(out, private_key, 32);
+}
+
 bool ed25519_sign(uint8_t signature[ED25519_SIGNATURE_LEN], const uint8_t* message, size_t message_len,
                   const uint8_t public_key[ED25519_PUBLIC_LEN], const uint8_t private_key[ED25519_PRIVATE_LEN]) {
     if (curve_init() != 0) return false;
@@ -584,8 +634,25 @@ static bool run_vector(const uint8_t seed[32], const uint8_t expect_pub[32], con
     return true;
 }
 
+// The Montgomery u-coordinates of the two public keys above, computed
+// independently rather than by this code: u = (1+y)/(1-y) mod 2^255-19. A
+// commutativity check would not catch a conversion that is wrong in a way both
+// sides share, which is the failure that would silently make every direct
+// message unreadable by anyone else.
+static const uint8_t TEST1_MONT[32] = {0xd8, 0x5e, 0x07, 0xec, 0x22, 0xb0, 0xad, 0x88, 0x15, 0x37, 0xc2,
+                                       0xf4, 0x4d, 0x66, 0x2d, 0x1a, 0x14, 0x3c, 0xf8, 0x30, 0xc5, 0x7a,
+                                       0xca, 0x43, 0x05, 0xd8, 0x5c, 0x7a, 0x90, 0xf6, 0xb6, 0x2e};
+static const uint8_t TEST2_MONT[32] = {0x25, 0xc7, 0x04, 0xc5, 0x94, 0xb8, 0x8a, 0xfc, 0x00, 0xa7, 0x6b,
+                                       0x69, 0xd1, 0xed, 0x2b, 0x98, 0x4d, 0x7e, 0x22, 0x55, 0x0f, 0x3e,
+                                       0xd0, 0x80, 0x2d, 0x04, 0xfb, 0xcd, 0x07, 0xd3, 0x8d, 0x47};
+
 bool ed25519_selftest(void) {
     if (!run_vector(TEST1_SEED, TEST1_PUB, NULL, 0, TEST1_SIG)) return false;
     if (!run_vector(TEST2_SEED, TEST2_PUB, TEST2_MSG, sizeof(TEST2_MSG), TEST2_SIG)) return false;
+
+    uint8_t u[32];
+    if (!ed25519_pub_to_x25519(u, TEST1_PUB) || memcmp(u, TEST1_MONT, 32) != 0) return false;
+    if (!ed25519_pub_to_x25519(u, TEST2_PUB) || memcmp(u, TEST2_MONT, 32) != 0) return false;
+
     return true;
 }

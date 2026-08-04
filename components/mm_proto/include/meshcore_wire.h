@@ -132,6 +132,37 @@ uint8_t mc_advert_signed_region(const uint8_t* payload, uint8_t size, uint8_t* o
 #define MC_ADVERT_SIGNATURE_OFFSET (MC_PUB_KEY_SIZE + 4)
 uint8_t mc_advert_build(const mc_advert_t* advert, uint8_t* out, size_t out_max);
 
+// --- direct messages -----------------------------------------------------
+//
+// A datagram payload: dest_hash[1] | src_hash[1] | mac[2] | ciphertext[...].
+//
+// Both "hashes" are simply the first byte of the respective public key. One byte
+// is not close to unique, and it is not meant to be: it narrows the candidate
+// contacts, and the MAC is what actually decides. So a receiver must be prepared
+// to try every contact whose key starts with that byte.
+#define MC_DEST_HASH_SIZE 1
+
+typedef struct {
+    uint8_t dest_hash;
+    uint8_t src_hash;
+    uint8_t mac[MC_CIPHER_MAC_SIZE];
+    uint8_t cipher_length;
+    uint8_t cipher[MC_MAX_PAYLOAD_SIZE];
+} mc_datagram_t;
+
+bool mc_datagram_parse(const uint8_t* payload, uint8_t size, mc_datagram_t* out);
+
+uint8_t mc_datagram_build(uint8_t dest_hash, uint8_t src_hash, const uint8_t mac[MC_CIPHER_MAC_SIZE],
+                          const uint8_t* cipher, uint8_t cipher_len, uint8_t* out, size_t out_max);
+
+// An acknowledgement carries the four-byte hash in the clear. It proves the
+// recipient decrypted the message, not merely that a frame arrived, because the
+// hash is computed over the plaintext.
+#define MC_ACK_HASH_SIZE 4
+
+uint8_t mc_ack_build(const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t* out, size_t out_max);
+bool    mc_ack_parse(const uint8_t* payload, uint8_t size, uint8_t out_hash[MC_ACK_HASH_SIZE]);
+
 const char* mc_role_name(mc_role_t role);
 
 // Human-readable payload type, for the traffic counters on screen.

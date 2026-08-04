@@ -43,7 +43,25 @@ bool ed25519_sign(uint8_t signature[ED25519_SIGNATURE_LEN], const uint8_t* messa
 bool ed25519_verify(const uint8_t signature[ED25519_SIGNATURE_LEN], const uint8_t* message, size_t message_len,
                     const uint8_t public_key[ED25519_PUBLIC_LEN]);
 
+// --- key agreement -------------------------------------------------------
+//
+// MeshCore encrypts direct messages under an X25519 shared secret derived from
+// the same Ed25519 identity that signs adverts, so one key pair serves both.
+// The two curves are birationally equivalent; these convert between them.
+
+// The peer's Ed25519 public key as a Curve25519 u-coordinate:
+//   u = (1 + y) / (1 - y) mod p
+// where y is the encoded point with the sign bit masked off. False if the key is
+// the one value with no Montgomery equivalent (y = 1, the identity).
+bool ed25519_pub_to_x25519(uint8_t out[32], const uint8_t public_key[ED25519_PUBLIC_LEN]);
+
+// Our X25519 scalar. This is just the clamped first half of the Ed25519 private
+// key -- no conversion involved, but going through a named function keeps the
+// layout assumption in one place.
+void ed25519_priv_to_x25519(uint8_t out[32], const uint8_t private_key[ED25519_PRIVATE_LEN]);
+
 // Run the RFC 8032 test vectors. Call once at boot: a wrong implementation
 // produces signatures that look fine locally and are rejected by every peer,
-// which is close to undiagnosable from the air.
+// which is close to undiagnosable from the air. Also checks the Montgomery
+// conversion against independently computed u-coordinates.
 bool ed25519_selftest(void);

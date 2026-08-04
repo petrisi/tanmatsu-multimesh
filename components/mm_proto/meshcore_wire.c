@@ -225,6 +225,54 @@ uint8_t mc_advert_build(const mc_advert_t* advert, uint8_t* out, size_t out_max)
     return pos;
 }
 
+bool mc_datagram_parse(const uint8_t* payload, uint8_t size, mc_datagram_t* out) {
+    if (payload == NULL || out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    if (size <= 2 + MC_CIPHER_MAC_SIZE) return false;  // no room for any ciphertext
+
+    uint8_t pos    = 0;
+    out->dest_hash = payload[pos++];
+    out->src_hash  = payload[pos++];
+    memcpy(out->mac, &payload[pos], MC_CIPHER_MAC_SIZE);
+    pos += MC_CIPHER_MAC_SIZE;
+
+    out->cipher_length = (uint8_t)(size - pos);
+    if (out->cipher_length > sizeof(out->cipher)) {
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+    memcpy(out->cipher, &payload[pos], out->cipher_length);
+    return true;
+}
+
+uint8_t mc_datagram_build(uint8_t dest_hash, uint8_t src_hash, const uint8_t mac[MC_CIPHER_MAC_SIZE],
+                          const uint8_t* cipher, uint8_t cipher_len, uint8_t* out, size_t out_max) {
+    if (out == NULL || mac == NULL || cipher == NULL || cipher_len == 0) return 0;
+
+    size_t total = 2 + MC_CIPHER_MAC_SIZE + cipher_len;
+    if (total > out_max || total > MC_MAX_PAYLOAD_SIZE) return 0;
+
+    out[0] = dest_hash;
+    out[1] = src_hash;
+    memcpy(&out[2], mac, MC_CIPHER_MAC_SIZE);
+    memcpy(&out[2 + MC_CIPHER_MAC_SIZE], cipher, cipher_len);
+    return (uint8_t)total;
+}
+
+uint8_t mc_ack_build(const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t* out, size_t out_max) {
+    if (out == NULL || hash == NULL || out_max < MC_ACK_HASH_SIZE) return 0;
+    memcpy(out, hash, MC_ACK_HASH_SIZE);
+    return MC_ACK_HASH_SIZE;
+}
+
+bool mc_ack_parse(const uint8_t* payload, uint8_t size, uint8_t out_hash[MC_ACK_HASH_SIZE]) {
+    if (payload == NULL || out_hash == NULL || size < MC_ACK_HASH_SIZE) return false;
+    // Longer acks exist -- upstream appends bytes to keep the packet hash unique
+    // -- and only the first four are the hash we match on.
+    memcpy(out_hash, payload, MC_ACK_HASH_SIZE);
+    return true;
+}
+
 const char* mc_role_name(mc_role_t role) {
     switch (role) {
         case MC_ROLE_CHAT_NODE: return "chat";

@@ -58,3 +58,47 @@ static inline bool mt_encrypt(const mt_key_t* key, uint32_t from_node, uint32_t 
                               size_t length) {
     return mt_decrypt(key, from_node, packet_id, data, length);
 }
+
+// --- PKI direct messages -------------------------------------------------
+//
+// A direct message between two nodes that have exchanged Curve25519 keys is
+// encrypted end to end instead of under a channel key, so nobody else on the
+// channel can read it. Unlike the channel cipher this one is authenticated:
+// AES-256-CCM with an eight-byte tag, which means a wrong key *does* fail
+// rather than yielding garbage.
+//
+// Nothing marks such a packet on the air. A receiver recognises it by the
+// channel hash being zero on a packet addressed to it and nothing else, then
+// tries the sender's key -- so the authentication tag is what decides.
+//
+// The key is SHA-256 over the raw X25519 output. The extra hash is upstream's
+// and is what makes this incompatible with MeshCore's otherwise similar scheme.
+
+// Ciphertext is this much longer than plaintext: an 8-byte tag and the 4-byte
+// per-packet nonce extension, both carried after the ciphertext.
+#define MT_PKI_OVERHEAD 12
+
+// Derive the AES key shared with a peer: SHA-256(X25519(ours, theirs)). Costs a
+// scalar multiplication, so cache it per contact rather than deriving per packet.
+bool mt_pki_shared_key(uint8_t out[32], const uint8_t our_private_key[32], const uint8_t their_public_key[32]);
+
+// Encrypt in place-ish: writes `length + MT_PKI_OVERHEAD` bytes to `out`.
+// `extra_nonce` must be fresh per packet -- with the packet id it is the whole
+// of the nonce, and repeating a pair under one key breaks CCM outright.
+bool mt_pki_encrypt(const uint8_t shared_key[32], uint32_t from_node, uint32_t packet_id, uint32_t extra_nonce,
+                    const uint8_t* plain, size_t length, uint8_t* out, size_t out_max);
+
+// The inverse. `length` is the whole on-air payload including the overhead;
+// `out_length` receives the plaintext length. False when the tag does not
+// verify, which is the normal way a packet meant for someone else is rejected.
+bool mt_pki_decrypt(const uint8_t shared_key[32], uint32_t from_node, uint32_t packet_id, const uint8_t* payload,
+                    size_t length, uint8_t* out, size_t out_max, size_t* out_length);
+
+// Round-trip the PKI path with two known key pairs and check that a tampered
+// byte fails. This proves the plumbing -- key derivation, nonce assembly, the
+// tag -- is self-consistent.
+//
+// It cannot prove interoperability: the nonce layout and the extra SHA-256 are
+// transcribed from upstream and no published test vector exists for them, so
+// only a real Meshtastic node on the other end settles that.
+bool mt_pki_selftest(void);
