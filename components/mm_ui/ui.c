@@ -1330,9 +1330,14 @@ static void draw_nodes(const app_model_t* model) {
     float y   = by + 8 + LINE_H * 1.5f;
     uint32_t now = (uint32_t)time(NULL);
 
+    // The selection is a table slot, so its row has to be looked up in the order
+    // as drawn. -1 means the pinned row above the list, which is also where a
+    // node that has just been removed leaves the cursor.
+    int selected = model_node_position(order, count, model->node_slot);
+
     // This radio, always first: it is the entry the user is most likely to want
     // and it is not something we ever hear over the air.
-    if (model->node_index < 0) pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
+    if (selected < 0) pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
     pax_draw_text(&fb, COL_OK, FONT, FONT_SIZE, bx + 14, y, "this radio");
     pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, bx + 14 + 12 * CHAR_W, y,
                   model->identity.name[0] ? model->identity.name : "(no name)");
@@ -1347,11 +1352,11 @@ static void draw_nodes(const app_model_t* model) {
 
     // Scroll the window so the selection stays visible.
     int first = 0;
-    if (model->node_index >= rows) first = model->node_index - rows + 1;
+    if (selected >= rows) first = selected - rows + 1;
 
     for (int i = first; i < count && i < first + rows; i++, y += LINE_H) {
         const node_t* node = &mesh->nodes[order[i]];
-        if (i == model->node_index) pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
+        if (i == selected) pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
 
         char label[NODE_NAME_MAX + 8];
         node_label(model, node, label, sizeof(label));
@@ -1391,13 +1396,21 @@ static void draw_node_detail(const app_model_t* model) {
 
     int order[MAX_NODES];
     int count = model_nodes_by_recency(mesh, order, MAX_NODES);
-    if (model->node_index < 0 || model->node_index >= count) return;
-    const node_t* node = &mesh->nodes[order[model->node_index]];
+
+    // By slot, so the node described is the node selected -- not whichever one
+    // the recency sort has since moved into that row.
+    const node_t* node = model_node_by_slot((mesh_state_t*)mesh, model->node_slot);
+    if (node == NULL) return;
+    int pos = model_node_position(order, count, model->node_slot);
 
     float bw = 52 * CHAR_W;
     float bh = LINE_H * 13 + 16;
     float bx, by;
-    overlay_box(bw, bh, &bx, &by, mesh->accent, "Node");
+
+    // Position in the list, because browsing without it is walking blind.
+    char title[24];
+    snprintf(title, sizeof(title), "Node %d/%d", pos + 1, count);
+    overlay_box(bw, bh, &bx, &by, mesh->accent, title);
 
     float y  = by + 8 + LINE_H * 1.5f;
     float vx = bx + 14 + 10 * CHAR_W;
@@ -1420,23 +1433,6 @@ static void draw_node_detail(const app_model_t* model) {
         y += LINE_H;
     }
 
-    // Whether a private message to this node is even possible. Meshtastic
-    // encrypts them to the recipient's key and current firmware will not send
-    // one without it, so a missing key is not a detail -- it is the difference
-    // between the conversation working and being refused.
-    if (model->active == MESH_MT) {
-        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Key");
-        if (node->has_public_key) {
-            char hex[24];
-            snprintf(hex, sizeof(hex), "%02x%02x%02x%02x...", node->public_key[0], node->public_key[1],
-                     node->public_key[2], node->public_key[3]);
-            pax_draw_text(&fb, COL_OK, FONT, FONT_SIZE, vx, y, hex);
-        } else {
-            pax_draw_text(&fb, COL_WARN, FONT, FONT_SIZE, vx, y, "none - exchange info first");
-        }
-        y += LINE_H;
-    }
-
     // What the message column will show for this node, and where it came from.
     // A Meshtastic node publishes its own; a MeshCore one has to be given one.
     char shown[NODE_SHORT_MAX + 1];
@@ -1452,17 +1448,25 @@ static void draw_node_detail(const app_model_t* model) {
     }
     y += LINE_H;
 
-    // The key is the identity on MeshCore and the DM key on Meshtastic; either
-    // way a prefix is enough to recognise it and the full thing will not fit.
-    if (node->has_public_key || model->active == MESH_MC) {
+    // One key row. It is the identity on MeshCore and the direct-message key on
+    // Meshtastic; either way a prefix is enough to recognise it and the whole
+    // thing will not fit.
+    //
+    // A missing Meshtastic key is not a blank field but the reason a
+    // conversation would be refused outright: current firmware will not send a
+    // direct message to a node whose key it does not hold. So it says what to
+    // do about it.
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Key");
+    if (model->active == MESH_MT && !node->has_public_key) {
+        pax_draw_text(&fb, COL_WARN, FONT, FONT_SIZE, vx, y, "none - exchange info first");
+    } else {
         const uint8_t* key = model->active == MESH_MC ? node->key : node->public_key;
         char           hex[40];
         snprintf(hex, sizeof(hex), "%02x%02x%02x%02x %02x%02x%02x%02x ...", key[0], key[1], key[2], key[3], key[4],
                  key[5], key[6], key[7]);
-        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Key");
-        pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, hex);
-        y += LINE_H;
+        pax_draw_text(&fb, model->active == MESH_MT ? COL_OK : COL_TEXT, FONT, FONT_SIZE, vx, y, hex);
     }
+    y += LINE_H;
 
     char when[40] = "never";
     if (node->last_heard > 1000000000u) {
@@ -1537,8 +1541,15 @@ static void draw_node_detail(const app_model_t* model) {
         y += LINE_H;
     }
 
-    float hx = bx + 12;
+    // Browsing on its own line above the actions: the action bar is already full
+    // and these are movement rather than something done to the node.
     float hy = by + bh - LINE_H - 8;
+    if (count > 1) {
+        pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, bx + 14, hy - LINE_H,
+                      "left/right browse   up/down first/last");
+    }
+
+    float hx = bx + 12;
     hx       = hint(hx, hy, CAP_CROSS, "back");
     hx       = hint(hx, hy, CAP_TRI, "message");
     hx       = hint(hx, hy, CAP_CIRCLE, "short");
@@ -1555,10 +1566,8 @@ static void draw_node_detail(const app_model_t* model) {
 static void draw_node_short(const app_model_t* model) {
     const mesh_state_t* mesh = &model->mesh[model->active];
 
-    int order[MAX_NODES];
-    int count = model_nodes_by_recency(mesh, order, MAX_NODES);
-    if (model->node_index < 0 || model->node_index >= count) return;
-    const node_t* node = &mesh->nodes[order[model->node_index]];
+    const node_t* node = model_node_by_slot((mesh_state_t*)mesh, model->node_slot);
+    if (node == NULL) return;
 
     float bw = 46 * CHAR_W;
     float bh = LINE_H * 7 + 16;

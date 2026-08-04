@@ -1105,16 +1105,21 @@ static void handle_nodes_key(bsp_input_navigation_key_t key) {
     int           order[MAX_NODES];
     int           count = model_nodes_by_recency(mesh, order, MAX_NODES);
 
+    // Where the pinned selection currently sits, which is what up and down move
+    // through. -1 both when nothing is selected and when the "this radio" row
+    // is, which is the row above the first node either way.
+    int pos = model_node_position(order, count, model.node_slot);
+
     switch (key) {
         case BSP_INPUT_NAVIGATION_KEY_UP:
-            if (model.node_index > -1) model.node_index--;
+            model.node_slot = pos > 0 ? order[pos - 1] : -1;
             break;
         case BSP_INPUT_NAVIGATION_KEY_DOWN:
-            if (model.node_index < count - 1) model.node_index++;
+            if (pos < count - 1) model.node_slot = order[pos + 1];
             break;
         case BSP_INPUT_NAVIGATION_KEY_RETURN:
             // The pinned "this radio" row has no node record behind it.
-            if (model.node_index >= 0 && model.node_index < count) model.overlay = OVERLAY_NODE_DETAIL;
+            if (model_node_by_slot(mesh, model.node_slot)) model.overlay = OVERLAY_NODE_DETAIL;
             break;
         case BSP_INPUT_NAVIGATION_KEY_F2:  // announce
             if (now_ms() - model.last_advert_ms < ADVERT_COOLDOWN_MS && model.last_advert_ms != 0) {
@@ -1146,10 +1151,37 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
     int           order[MAX_NODES];
     int           count = model_nodes_by_recency(mesh, order, MAX_NODES);
 
+    // Resolved once, from the pinned slot, and used by every action below. This
+    // is the point of the slot: the node acted on is the node on screen, not
+    // whatever the sort has moved into a row number since it was drawn.
+    node_t* node = model_node_by_slot(mesh, model.node_slot);
+    if (node == NULL) {
+        // Removed or expired underneath us. Nothing here can act on it, and
+        // showing a neighbour's details in its place would be worse than
+        // leaving.
+        model.overlay = OVERLAY_NODES;
+        return;
+    }
+    int pos = model_node_position(order, count, model.node_slot);
+
     switch (key) {
+        // Browsing. "Next" is resolved against the order as it stands now, so
+        // it always means the node after this one even if the list has been
+        // resorted since the last keypress.
+        case BSP_INPUT_NAVIGATION_KEY_LEFT:
+            if (pos > 0) model.node_slot = order[pos - 1];
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_RIGHT:
+            if (pos >= 0 && pos < count - 1) model.node_slot = order[pos + 1];
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_UP:
+            if (count > 0) model.node_slot = order[0];
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_DOWN:
+            if (count > 0) model.node_slot = order[count - 1];
+            break;
         case BSP_INPUT_NAVIGATION_KEY_F2:  // start a conversation with this node
-            if (model.node_index >= 0 && model.node_index < count) {
-                node_t* node = &mesh->nodes[order[model.node_index]];
+            {
                 model_target_set_contact(mesh, model.active, node);
                 model.overlay = OVERLAY_NONE;
 
@@ -1165,20 +1197,15 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
             }
             break;
         case BSP_INPUT_NAVIGATION_KEY_F4:  // set a short name for this node
-            if (model.node_index >= 0 && model.node_index < count) {
-                snprintf(model.node_short_edit, sizeof(model.node_short_edit), "%s",
-                         mesh->nodes[order[model.node_index]].short_name);
-                model.overlay = OVERLAY_NODE_SHORT;
-            }
+            snprintf(model.node_short_edit, sizeof(model.node_short_edit), "%s", node->short_name);
+            model.overlay = OVERLAY_NODE_SHORT;
             break;
         case BSP_INPUT_NAVIGATION_KEY_F6:  // swap identities with this node
             // Meshtastic will not send a private message to a node whose public
             // key it does not hold -- current firmware refuses outright rather
             // than falling back to anything weaker. This is how the key is
             // obtained: our NodeInfo, addressed to them, asking for theirs.
-            if (model.active == MESH_MT && model.node_index >= 0 && model.node_index < count) {
-                node_t* node = &mesh->nodes[order[model.node_index]];
-
+            if (model.active == MESH_MT) {
                 tx_request_t request = {.mesh = MESH_MT, .seq = UINT32_MAX};
                 request.length = mt_encode_info_exchange(mesh, &model.identity, node, request.frame,
                                                          sizeof(request.frame));
@@ -1198,8 +1225,7 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
             // is often the first to know it has stopped being true. Forgetting
             // it is enough on its own -- with no route the next message floods,
             // and a flooded message draws a fresh path return by itself.
-            if (model.active == MESH_MC && model.node_index >= 0 && model.node_index < count) {
-                node_t* node = &mesh->nodes[order[model.node_index]];
+            if (model.active == MESH_MC) {
                 if (node->has_out_path) {
                     node->has_out_path  = false;
                     node->out_path_ctrl = 0;
@@ -1212,13 +1238,13 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
             }
             break;
         case BSP_INPUT_NAVIGATION_KEY_F3:  // remove this node
-            if (model.node_index >= 0 && model.node_index < count) {
-                model_node_remove(mesh, order[model.node_index]);
-                nodestore_mark_dirty(model.active);
-                if (model.node_index >= count - 1) model.node_index = count - 2;
-                model.overlay = OVERLAY_NODES;
-                toast("node removed");
-            }
+            model_node_remove(mesh, model.node_slot);
+            nodestore_mark_dirty(model.active);
+            // Land on whatever took its place in the order, or on the row above
+            // if it was the last one. Never on a slot that no longer exists.
+            model.node_slot = pos >= 0 && pos < count - 1 ? order[pos + 1] : (pos > 0 ? order[pos - 1] : -1);
+            model.overlay   = OVERLAY_NODES;
+            toast("node removed");
             break;
         case BSP_INPUT_NAVIGATION_KEY_ESC:
         case BSP_INPUT_NAVIGATION_KEY_F1:
@@ -1229,14 +1255,12 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
 
 static void handle_node_short_key(bsp_input_navigation_key_t key) {
     mesh_state_t* mesh = model_active(&model);
-    int           order[MAX_NODES];
-    int           count = model_nodes_by_recency(mesh, order, MAX_NODES);
 
     switch (key) {
         case BSP_INPUT_NAVIGATION_KEY_BACKSPACE: field_backspace(model.node_short_edit); break;
-        case BSP_INPUT_NAVIGATION_KEY_RETURN:
-            if (model.node_index >= 0 && model.node_index < count) {
-                node_t* node = &mesh->nodes[order[model.node_index]];
+        case BSP_INPUT_NAVIGATION_KEY_RETURN: {
+            node_t* node = model_node_by_slot(mesh, model.node_slot);
+            if (node) {
                 snprintf(node->short_name, sizeof(node->short_name), "%s", model.node_short_edit);
                 nodestore_mark_dirty(model.active);
                 // An empty field is a deletion, not a mistake: it puts the node
@@ -1245,6 +1269,7 @@ static void handle_node_short_key(bsp_input_navigation_key_t key) {
             }
             model.overlay = OVERLAY_NODE_DETAIL;
             break;
+        }
         case BSP_INPUT_NAVIGATION_KEY_ESC:
         case BSP_INPUT_NAVIGATION_KEY_F1: model.overlay = OVERLAY_NODE_DETAIL; break;
         default: break;
@@ -1572,7 +1597,7 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
                 if (model.confirm_action == CONFIRM_CLEAR_NODES) {
                     model_nodes_clear(model_active(&model));
                     nodestore_mark_dirty(model.active);
-                    model.node_index = -1;
+                    model.node_slot = -1;
                     model.overlay    = OVERLAY_NODES;
                     toast("nodes cleared");
                 } else {
@@ -1649,7 +1674,7 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
             break;
         case BSP_INPUT_NAVIGATION_KEY_F4:
             model.overlay    = OVERLAY_NODES;
-            model.node_index = -1;
+            model.node_slot = -1;
             break;
         case BSP_INPUT_NAVIGATION_KEY_F5: open_identity(); break;
         case BSP_INPUT_NAVIGATION_KEY_F6:

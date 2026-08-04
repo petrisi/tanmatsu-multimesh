@@ -194,6 +194,12 @@ Dedup covers direct messages as well as broadcasts.
 
 ### Meshtastic relaying
 
+> **Experimental, and aimed at one situation:** temporarily holding a handful of
+> nodes together from somewhere with a view, for as long as you are there. Switch
+> it on when you arrive and off when you leave. It is not a substitute for a
+> deployed node — a handheld on battery is a poor repeater — and where a repeater
+> already covers you, leaving it off is the better neighbour.
+
 At role CLIENT this app forwards other people's packets; at CLIENT_MUTE it does
 not, which is what CLIENT_MUTE advertises and why it is the default. The hard
 rules are upstream's and hold in every mode: never a packet addressed to us,
@@ -250,6 +256,13 @@ downstream will underestimate how far away the sender is, and a message's reach
 is no longer bounded by the hop count its sender chose. It still terminates —
 dedup means each node relays a given `(from, id)` at most once — but it travels
 further than a plain mesh would carry it.
+
+### MeshCore off-grid repeat
+
+> **Experimental, and for being outside the MeshCore infrastructure entirely** —
+> a field day, a search, a group on a hill, bootstrapping a mesh before anything
+> permanent exists. Where deployed repeaters already cover you, they are better
+> placed, better powered and better behaved than a handheld; leave this off.
 
 **Off-grid repeat** *(MeshCore)* makes this client forward other nodes' packets
 so a handful of ordinary clients can give each other extra hops with no deployed

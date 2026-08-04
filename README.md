@@ -50,9 +50,10 @@ reflash.
   frame.
 - **MeshCore route learning** — flood until the contact returns a path, then send
   directly along it, with a retry ladder back to flooding when it stops working.
-- **Relaying on both networks** — MeshCore off-grid repeat, and a Meshtastic
-  CLIENT that really does forward for others, with SNR-weighted backoff and two
-  refinements upstream does not offer together.
+- **Relaying on both networks** *(experimental)* — MeshCore off-grid repeat, and
+  a Meshtastic CLIENT that really does forward for others, with SNR-weighted
+  backoff. Meant for temporarily holding a group together from a high spot, not
+  for standing in for a permanent node.
 - **A persistent node list** with per-node detail, short names, route management
   and Meshtastic key exchange.
 - **A Finnish keyboard layer** — å ö ä where a Finnish QWERTY puts them, on a
@@ -125,6 +126,14 @@ hint bar is always the authority on what they do.
 
 Per-node actions from the detail view: **△** message, **◯** set a short name,
 **■** remove, **☁** forget the route (MeshCore), **◇** exchange info (Meshtastic).
+**←/→** move to the previous or next node without going back to the list, and
+**↑/↓** jump to the first or last. The title shows your position.
+
+The selection follows the *node*, not the row it happened to be on. The list is
+sorted by last-heard and resorts whenever anything transmits, so a row number
+means a different node from one second to the next — and since the detail view
+resolves its actions when you press the key, that once meant you could remove or
+message a node you were not looking at.
 
 ### Message status
 
@@ -176,6 +185,20 @@ CLIENT_MUTE they would be controls for something that cannot happen. They are
 not mutually exclusive, and with both off a CLIENT behaves like any other
 Meshtastic client. `RPT <n>` on the status bar counts what has actually been
 forwarded, per network.
+
+> [!IMPORTANT]
+> **Both relay features are experimental, and they are aimed at one situation:**
+> you and your Tanmatsu are somewhere with a view — an observation tower, a hill,
+> a rooftop — and you want to hold a handful of nodes together for the afternoon.
+> Switch them on when you arrive and off when you leave.
+>
+> Off-grid repeat is for being **outside the MeshCore infrastructure entirely**,
+> where there is no deployed repeater to defer to. Meshtastic relaying is for the
+> same kind of gap on the other network.
+>
+> Neither is a substitute for a permanent node. A handheld on battery is a poor
+> repeater, and a mesh where every client repeats everything spends its airtime
+> on itself. If there is already a repeater covering you, leave both off.
 
 **`fn` + `0`…`7`** sets the Meshtastic hop limit for the current session only. It
 reaches 7 where the stored setting stops at 5, on the grounds that a limit worth

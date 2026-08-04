@@ -459,8 +459,16 @@ typedef struct {
     char lat_text[SET_COORD_MAX + 1];
     char lon_text[SET_COORD_MAX + 1];
 
-    // Nodes view. -1 on the "this radio" row that is pinned above the list.
-    int      node_index;
+    // Nodes view: which node is selected, as a slot in the node table rather
+    // than a row on screen. -1 is the "this radio" row pinned above the list.
+    //
+    // The distinction is the whole point. The list is sorted by last-heard and
+    // resorted on every draw, so a row number means a different node the moment
+    // anything transmits -- and since the detail view resolves its actions at
+    // keypress, a row number meant you could remove, forget or message a node
+    // you were not looking at. A table slot belongs to one node for its whole
+    // life, so pinning to it makes the live sort safe instead of hazardous.
+    int      node_slot;
     uint32_t last_advert_ms;  // manual announce cooldown
     char     node_short_edit[NODE_SHORT_MAX + 1];  // the short name being typed
 
@@ -586,6 +594,17 @@ int model_drop_narrow_routes(mesh_state_t* mesh, uint8_t min_hash_size);
 // Indices into `nodes`, most recently heard first. Returns how many were
 // written. Used by the list view, which never shows the raw array order.
 int model_nodes_by_recency(const mesh_state_t* mesh, int* out, int max);
+
+// The node occupying a table slot, or NULL if the slot is out of range or the
+// entry has been removed or expired. Every reader of the selection goes through
+// here, so a node that disappears while it is on screen is a NULL to handle
+// rather than whichever node the sort has since moved into its place.
+node_t* model_node_by_slot(mesh_state_t* mesh, int slot);
+
+// Where a slot sits in a sorted order, or -1 if it is not in it. This is how a
+// pinned selection is turned back into a row to highlight, and how "next" and
+// "previous" are resolved against the order as it stands right now.
+int model_node_position(const int* order, int count, int slot);
 
 static inline mesh_state_t* model_active(app_model_t* model) {
     return &model->mesh[model->active];

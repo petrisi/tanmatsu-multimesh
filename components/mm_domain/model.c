@@ -289,6 +289,19 @@ int model_nodes_by_recency(const mesh_state_t* mesh, int* out, int max) {
     return count;
 }
 
+node_t* model_node_by_slot(mesh_state_t* mesh, int slot) {
+    if (mesh == NULL || slot < 0 || slot >= MAX_NODES) return NULL;
+    return mesh->nodes[slot].used ? &mesh->nodes[slot] : NULL;
+}
+
+int model_node_position(const int* order, int count, int slot) {
+    if (order == NULL || slot < 0) return -1;
+    for (int i = 0; i < count; i++) {
+        if (order[i] == slot) return i;
+    }
+    return -1;
+}
+
 const message_t* model_message_by_seq(const mesh_state_t* mesh, int32_t seq) {
     if (seq < 0) return NULL;
     for (int i = 0; i < mesh->count; i++) {
