@@ -81,5 +81,40 @@ uint8_t mc_grp_txt_build(uint8_t channel_hash, const uint8_t mac[MC_CIPHER_MAC_S
 uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, const uint8_t* payload, uint8_t payload_len,
                         uint8_t* out, size_t out_max);
 
+// ADVERT: how a MeshCore node announces itself. There is no separate node id on
+// this network -- the Ed25519 public key *is* the identity.
+#define MC_PUB_KEY_SIZE   32
+#define MC_SIGNATURE_SIZE 64
+#define MC_NAME_MAX       32
+
+typedef enum {
+    MC_ROLE_UNKNOWN     = 0,
+    MC_ROLE_CHAT_NODE   = 1,
+    MC_ROLE_REPEATER    = 2,
+    MC_ROLE_ROOM_SERVER = 3,
+    MC_ROLE_SENSOR      = 4,
+} mc_role_t;
+
+typedef struct {
+    uint8_t   pub_key[MC_PUB_KEY_SIZE];
+    uint32_t  timestamp;  // the sender's clock, which may be wrong
+    uint8_t   signature[MC_SIGNATURE_SIZE];
+    mc_role_t role;
+    bool      has_name;
+    char      name[MC_NAME_MAX + 1];
+    bool      has_position;
+    int32_t   latitude;   // in units of 1e-6 degrees
+    int32_t   longitude;
+} mc_advert_t;
+
+bool mc_advert_parse(const uint8_t* payload, uint8_t size, mc_advert_t* out);
+
+// The bytes an advert signature covers: everything from the public key onward,
+// with the signature itself omitted. Needed both to verify one and to sign ours.
+// Returns the length written, or 0 if it will not fit.
+uint8_t mc_advert_signed_bytes(const mc_advert_t* advert, uint8_t* out, size_t out_max);
+
+const char* mc_role_name(mc_role_t role);
+
 // Human-readable payload type, for the traffic counters on screen.
 const char* mc_payload_type_name(mc_payload_type_t type);

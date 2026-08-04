@@ -79,4 +79,26 @@ size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_l
 uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_limit, uint8_t channel_hash,
                         const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max);
 
+// The User submessage carried on NODEINFO_APP: how a node announces its names
+// and key. Note the node *number* is not in here -- it comes from the packet
+// header's `from` field, and `id` is only a rendering of it.
+#define MT_USER_NAME_MAX  39
+#define MT_USER_SHORT_MAX 7
+#define MT_PUBLIC_KEY_LEN 32
+
+typedef struct {
+    char    id[16];  // "!aabbccdd"
+    char    long_name[MT_USER_NAME_MAX + 1];
+    char    short_name[MT_USER_SHORT_MAX + 1];
+    uint8_t hw_model;
+    uint8_t role;
+    uint8_t public_key[MT_PUBLIC_KEY_LEN];  // Curve25519, for PKI direct messages
+    bool    has_public_key;
+} mt_user_t;
+
+// Fields we do not use are skipped by wire type rather than rejected, so a
+// newer sender with extra fields still parses.
+bool   mt_user_parse(const uint8_t* buf, size_t len, mt_user_t* out);
+size_t mt_user_encode(const mt_user_t* user, uint8_t* out, size_t out_max);
+
 const char* mt_portnum_name(uint32_t portnum);

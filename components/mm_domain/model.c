@@ -70,6 +70,104 @@ const message_t* model_message_at(const mesh_state_t* mesh, int logical) {
     return &mesh->messages[idx];
 }
 
+// --- nodes ---------------------------------------------------------------
+
+// Claim a slot: an unused one if there is any, otherwise the least recently
+// heard entry. A full table should shed the stalest node rather than refuse to
+// learn about a new one.
+static node_t* claim_slot(mesh_state_t* mesh) {
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (!mesh->nodes[i].used) {
+            if (i >= mesh->node_count) mesh->node_count = i + 1;
+            return &mesh->nodes[i];
+        }
+    }
+
+    node_t* oldest = &mesh->nodes[0];
+    for (int i = 1; i < MAX_NODES; i++) {
+        if (mesh->nodes[i].last_heard < oldest->last_heard) oldest = &mesh->nodes[i];
+    }
+    return oldest;
+}
+
+static node_t* touch(mesh_state_t* mesh, node_t* node, bool fresh) {
+    if (fresh) memset(node, 0, sizeof(*node));
+    node->used       = true;
+    node->last_heard = (uint32_t)time(NULL);
+    return node;
+}
+
+node_t* model_node_touch_mt(mesh_state_t* mesh, uint32_t node_num) {
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (mesh->nodes[i].used && mesh->nodes[i].node_num == node_num) return touch(mesh, &mesh->nodes[i], false);
+    }
+
+    node_t* node = touch(mesh, claim_slot(mesh), true);
+    node->node_num = node_num;
+    return node;
+}
+
+node_t* model_node_touch_mc(mesh_state_t* mesh, const uint8_t key[NODE_KEY_LEN]) {
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (mesh->nodes[i].used && memcmp(mesh->nodes[i].key, key, NODE_KEY_LEN) == 0) {
+            return touch(mesh, &mesh->nodes[i], false);
+        }
+    }
+
+    node_t* node = touch(mesh, claim_slot(mesh), true);
+    memcpy(node->key, key, NODE_KEY_LEN);
+    return node;
+}
+
+int model_nodes_prune(mesh_state_t* mesh, uint32_t now) {
+    int removed = 0;
+    for (int i = 0; i < MAX_NODES; i++) {
+        node_t* node = &mesh->nodes[i];
+        if (!node->used) continue;
+
+        // A clock that has not been set yet would expire everything at once.
+        if (now < node->last_heard) continue;
+
+        uint32_t age   = now - node->last_heard;
+        uint32_t limit = node->named ? NODE_EXPIRY_NAMED_S : NODE_EXPIRY_UNNAMED_S;
+        if (age > limit) {
+            memset(node, 0, sizeof(*node));
+            removed++;
+        }
+    }
+    return removed;
+}
+
+void model_nodes_clear(mesh_state_t* mesh) {
+    memset(mesh->nodes, 0, sizeof(mesh->nodes));
+    mesh->node_count = 0;
+}
+
+void model_node_remove(mesh_state_t* mesh, int index) {
+    if (index < 0 || index >= MAX_NODES) return;
+    memset(&mesh->nodes[index], 0, sizeof(mesh->nodes[index]));
+}
+
+int model_nodes_by_recency(const mesh_state_t* mesh, int* out, int max) {
+    int count = 0;
+    for (int i = 0; i < MAX_NODES && count < max; i++) {
+        if (mesh->nodes[i].used) out[count++] = i;
+    }
+
+    // Insertion sort: the table is small and this runs only when the list is
+    // drawn, so the simplest correct thing is the right thing.
+    for (int i = 1; i < count; i++) {
+        int key = out[i];
+        int j   = i - 1;
+        while (j >= 0 && mesh->nodes[out[j]].last_heard < mesh->nodes[key].last_heard) {
+            out[j + 1] = out[j];
+            j--;
+        }
+        out[j + 1] = key;
+    }
+    return count;
+}
+
 const message_t* model_message_by_seq(const mesh_state_t* mesh, int32_t seq) {
     if (seq < 0) return NULL;
     for (int i = 0; i < mesh->count; i++) {

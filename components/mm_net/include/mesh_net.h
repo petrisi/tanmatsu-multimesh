@@ -56,6 +56,15 @@ typedef struct mesh_net_s {
     // has no usable key.
     uint8_t (*encode)(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, const char* text,
                       uint32_t msg_seq, uint8_t* out, size_t out_max);
+
+    // Build a frame carrying an already-encoded application payload, for things
+    // that are not chat -- an announcement, say. NULL where the network has no
+    // such concept, or where it needs machinery we do not have yet: a MeshCore
+    // advert must be Ed25519-signed, so it does not go through here.
+    //
+    // Returns the frame length, or 0.
+    uint8_t (*encode_app)(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, uint32_t portnum,
+                          const uint8_t* payload, size_t payload_len, uint8_t* out, size_t out_max);
 } mesh_net_t;
 
 extern const mesh_net_t mesh_net_meshcore;

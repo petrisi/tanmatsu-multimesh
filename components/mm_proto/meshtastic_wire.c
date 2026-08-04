@@ -185,6 +185,114 @@ uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_lim
     return (uint8_t)total;
 }
 
+// Copy a length-delimited protobuf string into a fixed buffer, always
+// terminated. Over-long values are truncated rather than rejected: a name we
+// cannot fully display is still better than no node at all.
+static void copy_string(char* dst, size_t dst_size, const uint8_t* src, size_t len) {
+    if (len > dst_size - 1) len = dst_size - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+bool mt_user_parse(const uint8_t* buf, size_t len, mt_user_t* out) {
+    if (buf == NULL || out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+
+    size_t pos       = 0;
+    bool   saw_field = false;
+
+    while (pos < len) {
+        uint64_t key;
+        if (!read_varint(buf, len, &pos, &key)) return false;
+
+        uint32_t field     = (uint32_t)(key >> 3);
+        uint8_t  wire_type = (uint8_t)(key & 0x07);
+        if (field == 0) return false;
+
+        switch (wire_type) {
+            case 0: {  // varint
+                uint64_t value;
+                if (!read_varint(buf, len, &pos, &value)) return false;
+                if (field == 5) out->hw_model = (uint8_t)value;
+                if (field == 7) out->role = (uint8_t)value;
+                saw_field = true;
+                break;
+            }
+            case 1:
+                if (len - pos < 8) return false;
+                pos += 8;
+                break;
+            case 2: {  // length-delimited
+                uint64_t length;
+                if (!read_varint(buf, len, &pos, &length)) return false;
+                if (length > len - pos) return false;
+
+                switch (field) {
+                    case 1: copy_string(out->id, sizeof(out->id), &buf[pos], (size_t)length); break;
+                    case 2: copy_string(out->long_name, sizeof(out->long_name), &buf[pos], (size_t)length); break;
+                    case 3: copy_string(out->short_name, sizeof(out->short_name), &buf[pos], (size_t)length); break;
+                    case 8:
+                        if (length == MT_PUBLIC_KEY_LEN) {
+                            memcpy(out->public_key, &buf[pos], MT_PUBLIC_KEY_LEN);
+                            out->has_public_key = true;
+                        }
+                        break;
+                    default: break;
+                }
+                pos       += (size_t)length;
+                saw_field  = true;
+                break;
+            }
+            case 5:
+                if (len - pos < 4) return false;
+                pos += 4;
+                break;
+            default:
+                return false;
+        }
+    }
+    return saw_field;
+}
+
+size_t mt_user_encode(const mt_user_t* user, uint8_t* out, size_t out_max) {
+    if (user == NULL || out == NULL) return 0;
+
+    size_t pos = 0;
+
+    // Only the fields that identify us. Others are optional and adding them
+    // would cost airtime on a channel that is already duty-cycle limited.
+    const struct {
+        uint32_t    field;
+        const char* value;
+    } strings[] = {{1, user->id}, {2, user->long_name}, {3, user->short_name}};
+
+    for (size_t i = 0; i < sizeof(strings) / sizeof(strings[0]); i++) {
+        size_t len = strlen(strings[i].value);
+        if (len == 0) continue;
+
+        size_t n = write_varint(&out[pos], out_max - pos, (strings[i].field << 3) | 2);
+        if (n == 0) return 0;
+        pos += n;
+        n    = write_varint(&out[pos], out_max - pos, len);
+        if (n == 0) return 0;
+        pos += n;
+        if (pos + len > out_max) return 0;
+        memcpy(&out[pos], strings[i].value, len);
+        pos += len;
+    }
+
+    if (user->hw_model) {
+        size_t n = write_varint(&out[pos], out_max - pos, (5 << 3) | 0);
+        if (n == 0) return 0;
+        pos += n;
+        n    = write_varint(&out[pos], out_max - pos, user->hw_model);
+        if (n == 0) return 0;
+        pos += n;
+    }
+
+    return pos;
+}
+
 const char* mt_portnum_name(uint32_t portnum) {
     switch (portnum) {
         case MT_PORTNUM_TEXT_MESSAGE: return "text";

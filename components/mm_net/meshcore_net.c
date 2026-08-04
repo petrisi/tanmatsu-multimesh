@@ -149,7 +149,34 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
         return false;
     }
 
-    if (packet.type == MC_PAYLOAD_ADVERT) adverts++;
+    // An advert is how a MeshCore node introduces itself: public key, role and
+    // usually a name. It is the only way we learn nodes on this network, since
+    // channel messages carry no identity beyond the name inside the text.
+    if (packet.type == MC_PAYLOAD_ADVERT) {
+        adverts++;
+
+        mc_advert_t advert;
+        if (mc_advert_parse(packet.payload, packet.payload_length, &advert)) {
+            node_t* node = model_node_touch_mc(mesh, advert.pub_key);
+            if (node) {
+                node->role      = (uint8_t)advert.role;
+                node->rssi_dbm  = -(int)pkt->stats.rssi_pkt_raw / 2;
+                node->snr_db_x4 = pkt->stats.snr_pkt_raw;
+                node->hops      = packet.hop_count;
+                memcpy(node->public_key, advert.pub_key, NODE_KEY_LEN);
+                node->has_public_key = true;
+                if (advert.has_name) {
+                    snprintf(node->long_name, sizeof(node->long_name), "%s", advert.name);
+                    node->named = true;
+                }
+                ESP_LOGI(TAG, "advert %s (%s)", advert.has_name ? advert.name : "unnamed",
+                         mc_role_name(advert.role));
+            }
+        }
+        detail(mesh);
+        return false;
+    }
+
     if (packet.type != MC_PAYLOAD_GRP_TXT) {
         detail(mesh);
         return false;

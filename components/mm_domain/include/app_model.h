@@ -121,10 +121,42 @@ typedef struct {
     char     detail[72];
 } rx_stats_t;
 
+#define NODE_NAME_MAX  39
+#define NODE_SHORT_MAX 7
+#define MAX_NODES      48
+#define NODE_KEY_LEN   32
+
+// One heard node, on either network. The two disagree about what identifies a
+// node -- Meshtastic uses a 32-bit number, MeshCore uses the public key itself
+// -- so both fields exist and each network fills the one it uses.
+typedef struct {
+    bool     used;
+    uint32_t last_heard;  // our clock, never the sender's
+    bool     named;       // a NodeInfo or a named advert has been seen
+
+    uint32_t node_num;                      // Meshtastic
+    char     short_name[NODE_SHORT_MAX + 1];  // Meshtastic
+    uint8_t  hw_model;                      // Meshtastic
+
+    uint8_t key[NODE_KEY_LEN];  // MeshCore: the identity. Meshtastic: unused.
+    uint8_t role;               // MeshCore
+
+    char    long_name[NODE_NAME_MAX + 1];
+    uint8_t public_key[NODE_KEY_LEN];  // Meshtastic: Curve25519 from NodeInfo
+    bool    has_public_key;
+
+    int     rssi_dbm;  // of the last packet heard from it
+    int     snr_db_x4;
+    uint8_t hops;
+} node_t;
+
 typedef struct {
     const char* name;
     pax_col_t   accent;  // status bar background for this mesh
     rx_stats_t  stats;
+
+    node_t nodes[MAX_NODES];
+    int    node_count;
 
     channel_t channels[MAX_CHANNELS];
     int       channel_count;
@@ -153,7 +185,16 @@ typedef enum {
     OVERLAY_DETAIL,
     OVERLAY_IDENTITY,
     OVERLAY_CONFIRM,
+    OVERLAY_NODES,
+    OVERLAY_NODE_DETAIL,
 } overlay_t;
+
+// What a pending confirmation will do if accepted.
+typedef enum {
+    CONFIRM_NONE = 0,
+    CONFIRM_DELETE_CHANNEL,
+    CONFIRM_CLEAR_NODES,
+} confirm_action_t;
 
 typedef enum {
     FIELD_NAME = 0,
@@ -218,9 +259,14 @@ typedef struct {
 
     overlay_t overlay;
     int       picker_index;
-    editor_t  editor;
+    editor_t   editor;
     identity_t identity;
-    char      confirm_text[80];
+    char       confirm_text[80];
+    confirm_action_t confirm_action;
+
+    // Nodes view. -1 on the "this radio" row that is pinned above the list.
+    int      node_index;
+    uint32_t last_advert_ms;  // manual announce cooldown
 
     radio_state_t radio;
     int           battery_pct;
@@ -253,6 +299,27 @@ message_t* model_push(mesh_state_t* mesh, uint8_t channel, const char* sender, b
 // NULL rather than a stale slot when the message has aged out.
 const message_t* model_message_at(const mesh_state_t* mesh, int logical);
 const message_t* model_message_by_seq(const mesh_state_t* mesh, int32_t seq);
+
+// --- nodes ---------------------------------------------------------------
+
+// Find or create the entry for a node, and stamp it as heard now. Both return
+// NULL only when the table is full of entries newer than this one.
+node_t* model_node_touch_mt(mesh_state_t* mesh, uint32_t node_num);
+node_t* model_node_touch_mc(mesh_state_t* mesh, const uint8_t key[NODE_KEY_LEN]);
+
+// Drop entries we have not heard from in a long time. Nodes that never told us
+// their name expire far sooner: an unnamed entry is little more than evidence
+// that something transmitted once, while a named one is a contact.
+#define NODE_EXPIRY_UNNAMED_S (7 * 24 * 60 * 60)
+#define NODE_EXPIRY_NAMED_S   (30 * 24 * 60 * 60)
+int model_nodes_prune(mesh_state_t* mesh, uint32_t now);
+
+void model_nodes_clear(mesh_state_t* mesh);
+void model_node_remove(mesh_state_t* mesh, int index);
+
+// Indices into `nodes`, most recently heard first. Returns how many were
+// written. Used by the list view, which never shows the raw array order.
+int model_nodes_by_recency(const mesh_state_t* mesh, int* out, int max);
 
 static inline mesh_state_t* model_active(app_model_t* model) {
     return &model->mesh[model->active];

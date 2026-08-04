@@ -173,6 +173,15 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         return false;
     }
 
+    // Every packet tells us a node exists, whatever it turns out to contain and
+    // whether or not we hold its channel key. Names arrive later on NodeInfo.
+    node_t* node = model_node_touch_mt(mesh, packet.from);
+    if (node) {
+        node->rssi_dbm  = -(int)pkt->stats.rssi_pkt_raw / 2;
+        node->snr_db_x4 = pkt->stats.snr_pkt_raw;
+        node->hops      = mt_hops_taken(&packet);
+    }
+
     for (int i = 0; i < mesh->channel_count; i++) {
         const channel_t* ch = &mesh->channels[i];
         if (!ch->ready || packet.channel_hash != ch->hash) continue;
@@ -190,6 +199,29 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         mt_data_t data;
         if (!mt_data_parse(attempt.payload, attempt.payload_length, &data)) continue;
 
+        // NodeInfo is what turns a bare node number into a name. Handled before
+        // the text-message path because it is not a message and must not be
+        // shown as one.
+        if (data.portnum == MT_PORTNUM_NODEINFO) {
+            mt_user_t user;
+            if (node && mt_user_parse(data.payload, data.payload_length, &user)) {
+                snprintf(node->long_name, sizeof(node->long_name), "%s", user.long_name);
+                snprintf(node->short_name, sizeof(node->short_name), "%s", user.short_name);
+                node->hw_model = user.hw_model;
+                node->role     = user.role;
+                if (user.has_public_key) {
+                    memcpy(node->public_key, user.public_key, NODE_KEY_LEN);
+                    node->has_public_key = true;
+                }
+                node->named = user.long_name[0] != '\0' || user.short_name[0] != '\0';
+                ESP_LOGI(TAG, "nodeinfo %08lx = %s (%s)", (unsigned long)packet.from, user.long_name,
+                         user.short_name);
+            }
+            other_ports++;
+            detail(mesh);
+            return false;
+        }
+
         if (data.portnum != MT_PORTNUM_TEXT_MESSAGE) {
             other_ports++;
             detail(mesh);
@@ -201,12 +233,18 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         memcpy(body, data.payload, len);
         body[len] = '\0';
 
-        // Until a NodeInfo arrives the sender is the low 16 bits of the node
-        // number; colour, not a prefix, marks it as an id rather than a name.
+        // Prefer the short name we learned from a NodeInfo. Until one arrives
+        // the sender is the low 16 bits of the node number, and colour rather
+        // than a prefix marks it as an id.
         char who[SENDER_MAX];
-        snprintf(who, sizeof(who), "%04lx", (unsigned long)(attempt.from & 0xFFFF));
+        bool named = node && node->named && node->short_name[0];
+        if (named) {
+            snprintf(who, sizeof(who), "%s", node->short_name);
+        } else {
+            snprintf(who, sizeof(who), "%04lx", (unsigned long)(attempt.from & 0xFFFF));
+        }
 
-        message_t* msg = model_push(mesh, (uint8_t)i, who, false, body, false);
+        message_t* msg = model_push(mesh, (uint8_t)i, who, named, body, false);
         // Meshtastic stamps no time in the payload, so this is our receive clock.
         msg->rssi_dbm  = -(int)pkt->stats.rssi_pkt_raw / 2;
         msg->snr_db_x4 = pkt->stats.snr_pkt_raw;
@@ -230,15 +268,17 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
 #define MT_BROADCAST_ADDR 0xFFFFFFFFu
 #define MT_DEFAULT_HOPS   3
 
-static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, const char* text,
-                                 uint32_t msg_seq, uint8_t* out, size_t out_max) {
+// Everything we transmit goes through here: wrap an application payload in a
+// Data submessage, encrypt it, and build the broadcast header. `msg_seq` of
+// UINT32_MAX means there is no message row to credit repeats to.
+static uint8_t encode_frame(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, uint32_t portnum,
+                            const uint8_t* body, size_t body_len, uint32_t msg_seq, uint8_t* out, size_t out_max) {
     if (channel >= mesh->channel_count) return 0;
     const channel_t* ch = &mesh->channels[channel];
     if (!ch->ready) return 0;
 
     uint8_t payload[MT_MAX_PAYLOAD_SIZE];
-    size_t  payload_len = mt_data_encode(MT_PORTNUM_TEXT_MESSAGE, (const uint8_t*)text, strlen(text), payload,
-                                         sizeof(payload));
+    size_t  payload_len = mt_data_encode(portnum, body, body_len, payload, sizeof(payload));
     if (payload_len == 0) return 0;
 
     // The packet id is half the AES-CTR nonce. Reusing one under the same
@@ -249,7 +289,7 @@ static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const iden
     if (id == 0) id = 1;  // zero is reserved for "no id"
 
     mt_key_t key = {.length = ch->key_len};
-    memcpy(key.bytes, ch->key, ch->key_len);
+    if (ch->key_len) memcpy(key.bytes, ch->key, ch->key_len);
     if (!mt_encrypt(&key, identity->node_num, id, payload, payload_len)) return 0;
 
     uint8_t len = mt_packet_build(MT_BROADCAST_ADDR, identity->node_num, id, MT_DEFAULT_HOPS, ch->hash, payload,
@@ -258,6 +298,18 @@ static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const iden
 
     track_transmission(identity->node_num, id, msg_seq);
     return len;
+}
+
+static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, const char* text,
+                                 uint32_t msg_seq, uint8_t* out, size_t out_max) {
+    return encode_frame(mesh, channel, identity, MT_PORTNUM_TEXT_MESSAGE, (const uint8_t*)text, strlen(text),
+                        msg_seq, out, out_max);
+}
+
+static uint8_t meshtastic_encode_app(mesh_state_t* mesh, uint8_t channel, const identity_t* identity,
+                                     uint32_t portnum, const uint8_t* payload, size_t payload_len, uint8_t* out,
+                                     size_t out_max) {
+    return encode_frame(mesh, channel, identity, portnum, payload, payload_len, UINT32_MAX, out, out_max);
 }
 
 static const char* meshtastic_local_sender(const identity_t* identity) {
@@ -276,4 +328,5 @@ const mesh_net_t mesh_net_meshtastic = {
     .local_sender    = meshtastic_local_sender,
     .handle          = meshtastic_handle,
     .encode          = meshtastic_encode,
+    .encode_app      = meshtastic_encode_app,
 };

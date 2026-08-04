@@ -103,6 +103,109 @@ uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, const uin
     return (uint8_t)total;
 }
 
+// Advert flag byte: the low nibble is the role, the high bits say which optional
+// sections follow.
+#define ADVERT_FLAG_POSITION 0x10
+#define ADVERT_FLAG_FEAT1    0x20
+#define ADVERT_FLAG_FEAT2    0x40
+#define ADVERT_FLAG_NAME     0x80
+
+#define ADVERT_FIXED_LEN (MC_PUB_KEY_SIZE + 4 + MC_SIGNATURE_SIZE)
+
+bool mc_advert_parse(const uint8_t* payload, uint8_t size, mc_advert_t* out) {
+    if (payload == NULL || out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    if (size < ADVERT_FIXED_LEN) return false;
+
+    uint8_t pos = 0;
+    memcpy(out->pub_key, &payload[pos], MC_PUB_KEY_SIZE);
+    pos += MC_PUB_KEY_SIZE;
+    memcpy(&out->timestamp, &payload[pos], 4);
+    pos += 4;
+    memcpy(out->signature, &payload[pos], MC_SIGNATURE_SIZE);
+    pos += MC_SIGNATURE_SIZE;
+
+    // An advert with no app data is still a valid advert: we know the node
+    // exists and its key, just not its name.
+    if (pos >= size) return true;
+
+    uint8_t flags = payload[pos++];
+    out->role     = (mc_role_t)(flags & 0x0F);
+
+    if (flags & ADVERT_FLAG_POSITION) {
+        if (size - pos < 8) return false;
+        memcpy(&out->latitude, &payload[pos], 4);
+        pos += 4;
+        memcpy(&out->longitude, &payload[pos], 4);
+        pos += 4;
+        out->has_position = true;
+    }
+    // The two feature words are skipped rather than stored: nothing here uses
+    // them yet, but their length has to be honoured to find the name.
+    if (flags & ADVERT_FLAG_FEAT1) {
+        if (size - pos < 2) return false;
+        pos += 2;
+    }
+    if (flags & ADVERT_FLAG_FEAT2) {
+        if (size - pos < 2) return false;
+        pos += 2;
+    }
+
+    if (flags & ADVERT_FLAG_NAME) {
+        uint8_t name_len = (uint8_t)(size - pos);
+        if (name_len > MC_NAME_MAX) name_len = MC_NAME_MAX;
+        memcpy(out->name, &payload[pos], name_len);
+        out->name[name_len] = '\0';
+        out->has_name       = name_len > 0;
+    }
+    return true;
+}
+
+uint8_t mc_advert_signed_bytes(const mc_advert_t* advert, uint8_t* out, size_t out_max) {
+    if (advert == NULL || out == NULL) return 0;
+
+    // Public key and timestamp, then the app data -- the signature covers
+    // everything except itself.
+    size_t need = MC_PUB_KEY_SIZE + 4 + 1;
+    if (advert->has_position) need += 8;
+    if (advert->has_name) need += strlen(advert->name);
+    if (need > out_max || need > 255) return 0;
+
+    uint8_t pos = 0;
+    memcpy(&out[pos], advert->pub_key, MC_PUB_KEY_SIZE);
+    pos += MC_PUB_KEY_SIZE;
+    memcpy(&out[pos], &advert->timestamp, 4);
+    pos += 4;
+
+    uint8_t flags = (uint8_t)(advert->role & 0x0F);
+    if (advert->has_position) flags |= ADVERT_FLAG_POSITION;
+    if (advert->has_name) flags |= ADVERT_FLAG_NAME;
+    out[pos++] = flags;
+
+    if (advert->has_position) {
+        memcpy(&out[pos], &advert->latitude, 4);
+        pos += 4;
+        memcpy(&out[pos], &advert->longitude, 4);
+        pos += 4;
+    }
+    if (advert->has_name) {
+        size_t name_len = strlen(advert->name);
+        memcpy(&out[pos], advert->name, name_len);
+        pos += (uint8_t)name_len;
+    }
+    return pos;
+}
+
+const char* mc_role_name(mc_role_t role) {
+    switch (role) {
+        case MC_ROLE_CHAT_NODE: return "chat";
+        case MC_ROLE_REPEATER: return "repeater";
+        case MC_ROLE_ROOM_SERVER: return "room";
+        case MC_ROLE_SENSOR: return "sensor";
+        default: return "unknown";
+    }
+}
+
 const char* mc_payload_type_name(mc_payload_type_t type) {
     switch (type) {
         case MC_PAYLOAD_REQ: return "REQ";

@@ -8,6 +8,7 @@
 #include "bsp/display.h"
 #include "esp_log.h"
 #include "font_mono_fi.h"
+#include "meshcore_wire.h"
 #include "pax_gfx.h"
 #include "pax_text.h"
 #include "pax_types.h"
@@ -659,9 +660,10 @@ static void draw_hints(const app_model_t* model) {
     x = hint(x, hint_y + 1, CAP_CROSS, "exit");
     x = hint(x, hint_y + 1, CAP_TRI, model->active == MESH_MC ? "MT" : "MC");
     x = hint(x, hint_y + 1, CAP_SQUARE, model->show_meta ? "meta on" : "meta off");
+    x = hint(x, hint_y + 1, CAP_CIRCLE, "nodes");
     x = hint(x, hint_y + 1, CAP_CLOUD, "ident");
     x = hint(x, hint_y + 1, CAP_DIAMOND, "channels");
-    hint_text(x, hint_y + 1, "alt+up select");
+    (void)x;
 }
 
 // --- overlays ------------------------------------------------------------
@@ -965,6 +967,184 @@ static void draw_confirm(const app_model_t* model) {
     hint_text(hx, y, "enter delete");
 }
 
+// --- nodes ---------------------------------------------------------------
+
+// "3m", "4h", "6d" -- an absolute time is useless for judging whether a node is
+// still out there, and this fits a narrow column.
+static void format_age(char* out, size_t out_size, uint32_t last_heard, uint32_t now) {
+    if (last_heard == 0 || now < last_heard) {
+        snprintf(out, out_size, "  -");
+        return;
+    }
+    uint32_t age = now - last_heard;
+    if (age < 60) {
+        snprintf(out, out_size, "%2lus", (unsigned long)age);
+    } else if (age < 3600) {
+        snprintf(out, out_size, "%2lum", (unsigned long)(age / 60));
+    } else if (age < 86400) {
+        snprintf(out, out_size, "%2luh", (unsigned long)(age / 3600));
+    } else {
+        snprintf(out, out_size, "%2lud", (unsigned long)(age / 86400));
+    }
+}
+
+// The label a node is known by, falling back through what we actually have.
+static void node_label(const app_model_t* model, const node_t* node, char* out, size_t out_size) {
+    if (node->long_name[0]) {
+        snprintf(out, out_size, "%s", node->long_name);
+    } else if (node->short_name[0]) {
+        snprintf(out, out_size, "%s", node->short_name);
+    } else if (model->active == MESH_MT) {
+        snprintf(out, out_size, "!%08lx", (unsigned long)node->node_num);
+    } else {
+        // MeshCore identifies nodes by public key; a prefix is what other
+        // clients show too.
+        snprintf(out, out_size, "%02x%02x%02x%02x...", node->key[0], node->key[1], node->key[2], node->key[3]);
+    }
+}
+
+static void draw_nodes(const app_model_t* model) {
+    const mesh_state_t* mesh = &model->mesh[model->active];
+
+    int order[MAX_NODES];
+    int count = model_nodes_by_recency(mesh, order, MAX_NODES);
+
+    float bw   = 50 * CHAR_W;
+    int   rows = count < 12 ? count : 12;
+    float bh   = LINE_H * (rows + 6) + 12;
+    float bx, by;
+
+    char title[40];
+    snprintf(title, sizeof(title), "Nodes - %s", mesh->name);
+    overlay_box(bw, bh, &bx, &by, mesh->accent, title);
+
+    float y   = by + 8 + LINE_H * 1.5f;
+    uint32_t now = (uint32_t)time(NULL);
+
+    // This radio, always first: it is the entry the user is most likely to want
+    // and it is not something we ever hear over the air.
+    if (model->node_index < 0) pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
+    pax_draw_text(&fb, COL_OK, FONT, FONT_SIZE, bx + 14, y, "this radio");
+    pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, bx + 14 + 12 * CHAR_W, y,
+                  model->identity.name[0] ? model->identity.name : "(no name)");
+    y += LINE_H;
+    pax_draw_line(&fb, COL_SEP, bx + 10, y - 2, bx + bw - 10, y - 2);
+    y += 2;
+
+    if (count == 0) {
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "nothing heard yet");
+        y += LINE_H;
+    }
+
+    // Scroll the window so the selection stays visible.
+    int first = 0;
+    if (model->node_index >= rows) first = model->node_index - rows + 1;
+
+    for (int i = first; i < count && i < first + rows; i++, y += LINE_H) {
+        const node_t* node = &mesh->nodes[order[i]];
+        if (i == model->node_index) pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
+
+        char label[NODE_NAME_MAX + 8];
+        node_label(model, node, label, sizeof(label));
+        pax_draw_text(&fb, node->named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, bx + 14, label[0] ? y : y,
+                      label);
+
+        char age[8];
+        format_age(age, sizeof(age), node->last_heard, now);
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + bw - 12 - 3 * CHAR_W, y, age);
+    }
+
+    y       += 6;
+    float hx = bx + 12;
+    hx       = hint(hx, y, CAP_CROSS, "close");
+    hx       = hint(hx, y, CAP_TRI, "announce");
+    hx       = hint(hx, y, CAP_SQUARE, "clear all");
+    hint_text(hx, y, "enter details");
+}
+
+static void draw_node_detail(const app_model_t* model) {
+    const mesh_state_t* mesh = &model->mesh[model->active];
+
+    int order[MAX_NODES];
+    int count = model_nodes_by_recency(mesh, order, MAX_NODES);
+    if (model->node_index < 0 || model->node_index >= count) return;
+    const node_t* node = &mesh->nodes[order[model->node_index]];
+
+    float bw = 52 * CHAR_W;
+    float bh = LINE_H * 11 + 16;
+    float bx, by;
+    overlay_box(bw, bh, &bx, &by, mesh->accent, "Node");
+
+    float y  = by + 8 + LINE_H * 1.5f;
+    float vx = bx + 14 + 10 * CHAR_W;
+
+    char label[NODE_NAME_MAX + 8];
+    node_label(model, node, label, sizeof(label));
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Name");
+    pax_draw_text(&fb, node->named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, vx, y, label);
+    y += LINE_H;
+
+    if (model->active == MESH_MT) {
+        char id[16];
+        snprintf(id, sizeof(id), "!%08lx", (unsigned long)node->node_num);
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Node id");
+        pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, id);
+        y += LINE_H;
+
+        if (node->short_name[0]) {
+            pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Short");
+            pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, node->short_name);
+            y += LINE_H;
+        }
+    } else {
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Role");
+        pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, mc_role_name((mc_role_t)node->role));
+        y += LINE_H;
+    }
+
+    // The key is the identity on MeshCore and the DM key on Meshtastic; either
+    // way a prefix is enough to recognise it and the full thing will not fit.
+    if (node->has_public_key || model->active == MESH_MC) {
+        const uint8_t* key = model->active == MESH_MC ? node->key : node->public_key;
+        char           hex[40];
+        snprintf(hex, sizeof(hex), "%02x%02x%02x%02x %02x%02x%02x%02x ...", key[0], key[1], key[2], key[3], key[4],
+                 key[5], key[6], key[7]);
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Key");
+        pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, hex);
+        y += LINE_H;
+    }
+
+    char when[40] = "never";
+    if (node->last_heard > 1000000000u) {
+        time_t    t = (time_t)node->last_heard;
+        struct tm tm_buf;
+        localtime_r(&t, &tm_buf);
+        strftime(when, sizeof(when), "%a %d %b %H:%M:%S", &tm_buf);
+    }
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Last heard");
+    pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, when);
+    y += LINE_H;
+
+    char radio[48];
+    snprintf(radio, sizeof(radio), "%d dBm  %d.%02d dB  %u hop(s)", node->rssi_dbm, node->snr_db_x4 / 4,
+             (node->snr_db_x4 < 0 ? -node->snr_db_x4 : node->snr_db_x4) % 4 * 25, (unsigned)node->hops);
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Signal");
+    pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, radio);
+    y += LINE_H;
+
+    // MeshCore adverts are signed, but verifying needs Ed25519 which is not
+    // wired up yet. Saying so is better than implying the name is proven.
+    if (model->active == MESH_MC && node->named) {
+        pax_draw_text(&fb, COL_WARN, FONT, FONT_SIZE, bx + 14, y, "name not cryptographically verified");
+        y += LINE_H;
+    }
+
+    float hx = bx + 12;
+    float hy = by + bh - LINE_H - 8;
+    hx       = hint(hx, hy, CAP_CROSS, "back");
+    hint(hx, hy, CAP_SQUARE, "remove node");
+}
+
 static void draw_toast(const app_model_t* model) {
     if (model->toast[0] == '\0') return;
 
@@ -992,6 +1172,8 @@ void ui_render(const app_model_t* model) {
         case OVERLAY_IDENTITY: draw_identity(model); break;
         case OVERLAY_DETAIL: draw_detail(model); break;
         case OVERLAY_CONFIRM: draw_confirm(model); break;
+        case OVERLAY_NODES: draw_nodes(model); break;
+        case OVERLAY_NODE_DETAIL: draw_node_detail(model); break;
         default: break;
     }
     blit();

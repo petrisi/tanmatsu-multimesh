@@ -23,6 +23,8 @@
 #include "freertos/task.h"
 #include "leds.h"
 #include "mesh_net.h"
+#include "meshtastic_wire.h"
+#include "nodestore.h"
 #include "nvs_flash.h"
 #include "radio.h"
 #include "settings.h"
@@ -345,6 +347,47 @@ static bool poll_power(void) {
     return changed;
 }
 
+// Announcing ourselves costs airtime on a duty-cycle limited band, so a manual
+// send is rate limited. The automatic one is far rarer.
+#define ADVERT_COOLDOWN_MS (5 * 60 * 1000)
+#define ADVERT_INTERVAL_MS (24u * 60 * 60 * 1000)
+
+static uint32_t next_auto_advert_ms;
+static bool     send_announcement(bool manual);
+
+// --- housekeeping --------------------------------------------------------
+
+// Expire stale nodes, write the table if it changed, and announce ourselves on
+// the slow timer. All rate-limited internally, so calling this every loop is
+// cheap.
+static bool housekeeping(void) {
+    static uint32_t next_prune_ms = 0;
+    bool            changed       = false;
+
+    uint32_t now = (uint32_t)time(NULL);
+    if (now_ms() >= next_prune_ms) {
+        next_prune_ms = now_ms() + 60000;
+        // Only prune once the clock is real: with an unset clock every node
+        // would look ancient and be dropped.
+        if (model.time_synced && now > 1000000000u) {
+            for (int i = 0; i < MESH_COUNT; i++) {
+                if (model_nodes_prune(&model.mesh[i], now) > 0) {
+                    nodestore_mark_dirty((mesh_id_t)i);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if (next_auto_advert_ms != 0 && now_ms() >= next_auto_advert_ms) {
+        next_auto_advert_ms = now_ms() + ADVERT_INTERVAL_MS;
+        send_announcement(false);
+    }
+
+    nodestore_flush(&model, false);
+    return changed;
+}
+
 // --- navigation ----------------------------------------------------------
 
 // Retune the radio to whichever network is now active. Anything already queued
@@ -386,7 +429,10 @@ static bool radio_poll(void) {
         if (!radio_receive(&packet, 0)) break;
 
         mesh_state_t* mesh = model_active(&model);
-        if (nets[model.active]->handle(&packet, mesh)) {
+        bool          message = nets[model.active]->handle(&packet, mesh);
+        // Any received packet updates a node's last-heard stamp.
+        nodestore_mark_dirty(model.active);
+        if (message) {
             // Blink the LED in the colour of the channel it arrived on.
             const message_t* newest = model_message_at(mesh, mesh->count - 1);
             if (newest && newest->channel < mesh->channel_count) {
@@ -639,6 +685,7 @@ static void handle_editor_key(bsp_input_navigation_key_t key) {
                 if (mesh->channel_count <= 1) {
                     toast("cannot delete the last channel");
                 } else {
+                    model.confirm_action = CONFIRM_DELETE_CHANNEL;
                     snprintf(model.confirm_text, sizeof(model.confirm_text), "Delete %s?",
                              mesh->channels[ed->index].name);
                     model.overlay = OVERLAY_CONFIRM;
@@ -692,6 +739,117 @@ static void handle_identity_key(bsp_input_navigation_key_t key) {
     }
 }
 
+// --- nodes ---------------------------------------------------------------
+
+// Build and queue our own announcement for the active network. Meshtastic gets
+// a NodeInfo; MeshCore needs a signed advert, which is not implemented yet.
+static bool send_announcement(bool manual) {
+    if (!radio_is_ready()) {
+        if (manual) toast("radio unavailable");
+        return false;
+    }
+    if (!identity_is_set(&model.identity)) {
+        if (manual) toast("set a name first");
+        return false;
+    }
+    if (model.active != MESH_MT) {
+        if (manual) toast("MeshCore advert needs signing - not yet");
+        return false;
+    }
+
+    mesh_state_t* mesh = model_active(&model);
+    if (mesh->channel_count == 0) return false;
+    const channel_t* ch = &mesh->channels[mesh->input_channel];
+    if (!ch->ready) return false;
+
+    mt_user_t user = {0};
+    snprintf(user.id, sizeof(user.id), "%s", model.identity.node_id);
+    snprintf(user.long_name, sizeof(user.long_name), "%s", model.identity.name);
+    snprintf(user.short_name, sizeof(user.short_name), "%s", model.identity.short_name);
+
+    uint8_t body[MT_MAX_PAYLOAD_SIZE];
+    size_t  body_len = mt_user_encode(&user, body, sizeof(body));
+    if (body_len == 0) return false;
+
+    tx_request_t request = {.mesh = model.active, .seq = UINT32_MAX};  // no message row to track
+    request.length = nets[model.active]->encode_app(mesh, (uint8_t)mesh->input_channel, &model.identity,
+                                                    MT_PORTNUM_NODEINFO, body, body_len, request.frame,
+                                                    sizeof(request.frame));
+    if (request.length == 0) return false;
+
+    if (xQueueSend(tx_requests, &request, 0) != pdTRUE) {
+        if (manual) toast("transmit queue full");
+        return false;
+    }
+
+    model.last_advert_ms = now_ms();
+    if (manual) toast("announced");
+    return true;
+}
+
+static void handle_nodes_key(bsp_input_navigation_key_t key) {
+    mesh_state_t* mesh = model_active(&model);
+    int           order[MAX_NODES];
+    int           count = model_nodes_by_recency(mesh, order, MAX_NODES);
+
+    switch (key) {
+        case BSP_INPUT_NAVIGATION_KEY_UP:
+            if (model.node_index > -1) model.node_index--;
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_DOWN:
+            if (model.node_index < count - 1) model.node_index++;
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_RETURN:
+            // The pinned "this radio" row has no node record behind it.
+            if (model.node_index >= 0 && model.node_index < count) model.overlay = OVERLAY_NODE_DETAIL;
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_F2:  // announce
+            if (now_ms() - model.last_advert_ms < ADVERT_COOLDOWN_MS && model.last_advert_ms != 0) {
+                uint32_t left = (ADVERT_COOLDOWN_MS - (now_ms() - model.last_advert_ms)) / 1000;
+                toast("wait %lus before announcing again", (unsigned long)left);
+            } else {
+                send_announcement(true);
+            }
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_F3:  // clear all
+            if (count == 0) {
+                toast("no nodes to clear");
+            } else {
+                snprintf(model.confirm_text, sizeof(model.confirm_text), "Forget all %d %s nodes?", count,
+                         mesh->name);
+                model.confirm_action = CONFIRM_CLEAR_NODES;
+                model.overlay        = OVERLAY_CONFIRM;
+            }
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_ESC:
+        case BSP_INPUT_NAVIGATION_KEY_F1:
+        case BSP_INPUT_NAVIGATION_KEY_F4: model.overlay = OVERLAY_NONE; break;
+        default: break;
+    }
+}
+
+static void handle_node_detail_key(bsp_input_navigation_key_t key) {
+    mesh_state_t* mesh = model_active(&model);
+    int           order[MAX_NODES];
+    int           count = model_nodes_by_recency(mesh, order, MAX_NODES);
+
+    switch (key) {
+        case BSP_INPUT_NAVIGATION_KEY_F3:  // remove this node
+            if (model.node_index >= 0 && model.node_index < count) {
+                model_node_remove(mesh, order[model.node_index]);
+                nodestore_mark_dirty(model.active);
+                if (model.node_index >= count - 1) model.node_index = count - 2;
+                model.overlay = OVERLAY_NODES;
+                toast("node removed");
+            }
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_ESC:
+        case BSP_INPUT_NAVIGATION_KEY_F1:
+        case BSP_INPUT_NAVIGATION_KEY_RETURN: model.overlay = OVERLAY_NODES; break;
+        default: break;
+    }
+}
+
 static void handle_picker_key(bsp_input_navigation_key_t key) {
     mesh_state_t* mesh = model_active(&model);
 
@@ -726,6 +884,8 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
         case OVERLAY_EDITOR: handle_editor_key(key); return;
         case OVERLAY_IDENTITY: handle_identity_key(key); return;
         case OVERLAY_PICKER: handle_picker_key(key); return;
+        case OVERLAY_NODES: handle_nodes_key(key); return;
+        case OVERLAY_NODE_DETAIL: handle_node_detail_key(key); return;
         case OVERLAY_DETAIL:
             if (key == BSP_INPUT_NAVIGATION_KEY_ESC || key == BSP_INPUT_NAVIGATION_KEY_F1 ||
                 key == BSP_INPUT_NAVIGATION_KEY_RETURN) {
@@ -733,10 +893,22 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
             }
             return;
         case OVERLAY_CONFIRM:
+            // Where cancelling returns to depends on what asked for the
+            // confirmation, so the action carries that too.
             if (key == BSP_INPUT_NAVIGATION_KEY_RETURN) {
-                editor_delete_confirmed();
+                if (model.confirm_action == CONFIRM_CLEAR_NODES) {
+                    model_nodes_clear(model_active(&model));
+                    nodestore_mark_dirty(model.active);
+                    model.node_index = -1;
+                    model.overlay    = OVERLAY_NODES;
+                    toast("nodes cleared");
+                } else {
+                    editor_delete_confirmed();
+                }
+                model.confirm_action = CONFIRM_NONE;
             } else if (key == BSP_INPUT_NAVIGATION_KEY_ESC || key == BSP_INPUT_NAVIGATION_KEY_F1) {
-                model.overlay = OVERLAY_EDITOR;
+                model.overlay = model.confirm_action == CONFIRM_CLEAR_NODES ? OVERLAY_NODES : OVERLAY_EDITOR;
+                model.confirm_action = CONFIRM_NONE;
             }
             return;
         default: break;
@@ -780,7 +952,10 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
             model.show_meta = !model.show_meta;
             settings_save_prefs(&model);
             break;
-        case BSP_INPUT_NAVIGATION_KEY_F4: toast("emoji picker: not in this build"); break;
+        case BSP_INPUT_NAVIGATION_KEY_F4:
+            model.overlay    = OVERLAY_NODES;
+            model.node_index = -1;
+            break;
         case BSP_INPUT_NAVIGATION_KEY_F5: open_identity(); break;
         case BSP_INPUT_NAVIGATION_KEY_F6:
             model.overlay      = OVERLAY_PICKER;
@@ -879,6 +1054,12 @@ void app_main(void) {
         prepare_channels((mesh_id_t)i);
     }
 
+    if (nodestore_init()) {
+        nodestore_load(&model);
+    } else {
+        ESP_LOGW(TAG, "nodes will not persist this session");
+    }
+
     leds_init();
     leds_set_mesh(model_active(&model)->accent);
 
@@ -899,6 +1080,7 @@ void app_main(void) {
 
         // Priority below the UI loop: a blocked transmit must never delay input
         // handling or drawing.
+        next_auto_advert_ms = now_ms() + 60000;
         if (xTaskCreate(tx_worker, "mm_tx", 4096, NULL, 4, NULL) != pdPASS) {
             ESP_LOGE(TAG, "transmit worker could not be started");
         }
@@ -965,6 +1147,7 @@ void app_main(void) {
         if (radio_poll()) dirty = true;
         if (drain_tx_events()) dirty = true;
         if (poll_power()) dirty = true;
+        if (housekeeping()) dirty = true;
         if (tx_settle()) dirty = true;
         leds_tick();
 
