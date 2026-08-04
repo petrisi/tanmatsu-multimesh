@@ -8,6 +8,38 @@
 #   + a local venv
 /tools/badgelink/
 
+# Internal working material: design notes, implementation plans, investigation
+# write-ups and scratch analysis. Published documentation lives in /docs and is
+# tracked; anything below is a working draft and stays local.
+/notes/
+/plans/
+/design/
+/scratch/
+/private/
+/wip/
+TODO.md
+NOTES.md
+PLAN.md
+*.plan.md
+*.design.md
+*.draft.md
+*.notes.md
+*.internal.md
+*-plan.md
+*-design.md
+*-draft.md
+*-notes.md
+*-internal.md
+
+# Captured device state and session recordings — these come off a real radio and
+# can contain node names, keys, coordinates and message contents.
+*.log
+session*.log
+nodes-*.bin
+*.nvs
+*.capture
+/captures/
+
 # Machine-local ESP-IDF location markers (read by the upstream Makefiles)
 .IDF_PATH
 .IDF_TOOLS_PATH

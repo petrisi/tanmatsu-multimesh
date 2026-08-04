@@ -1,260 +1,110 @@
 # MultiMesh
 
-`fi.ps.multimesh`
+**Mesh communications for the [Tanmatsu](https://nicolaielectronics.nl/tanmatsu/)
+handheld — MeshCore and Meshtastic in one app, switched with a single keypress.**
 
-A mesh communications client for the [Tanmatsu](https://nicolaielectronics.nl/tanmatsu/)
-handheld that speaks **MeshCore and Meshtastic** from one app, switching between
-them with a single keypress.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform: ESP32-P4](https://img.shields.io/badge/platform-ESP32--P4-informational.svg)](#hardware)
+[![ESP-IDF v6.0.2](https://img.shields.io/badge/ESP--IDF-v6.0.2-red.svg)](https://docs.espressif.com/projects/esp-idf/)
 
-Send and receive on broadcast channels of either network, manage channels of
-every type both networks support, and keep a persistent list of the nodes you
-have heard — with MeshCore adverts signed on the way out and verified on the way
-in.
+```
+          ((  o  ))
+       ((     |     ))
+    ((        |        ))
+             /|\
+            / | \
+      _____/__|__\_____
 
-## Why this shape
+#   # #   # #     ##### #####
+## ## #   # #       #     #
+# # # #   # #       #     #
+#   # #   # #       #     #
+#   #  ###  #####   #   #####
+   #   # #####  #### #   #
+   ## ## #     #     #   #
+   # # # ####   ###  #####
+   #   # #         # #   #
+   #   # ##### ####  #   #
 
-The SX1262 is wired to the ESP32-C6, not to the ESP32-P4 that runs apps. The
-stock C6 firmware (`tanmatsu-radio`, an esp-hosted-mcu fork) exposes the radio as
-a *dumb modem* over an RPC channel, so the entire protocol stack — framing,
-crypto, routing — runs in application code on the P4.
+   MeshCore  +  Meshtastic
+```
 
-That matters, because upstream the two networks are integrated very differently:
-MeshCore runs as a P4 app over the raw LoRa RPC, while Meshtastic replaces the C6
-firmware outright, costing the P4 its WiFi and BLE and making a switch a reflash.
+Both protocol stacks are implemented from the wire up in application code on the
+ESP32-P4, so the C6 radio coprocessor keeps its stock firmware and changing
+network is a config change and one `lora_set_config()` call — no reboot, no
+reflash.
 
-Implementing every network as a P4-side stack behind one `mesh_net_t` interface
-keeps the C6 on stock firmware and reduces "switch network" to a config change
-plus one `lora_set_config()` call — no reboot, no reflash.
+---
 
-One radio means one network at a time: fast switching, not simultaneous
-operation. See [docs/second-radio-investigation.md](docs/second-radio-investigation.md)
-for what a second radio would take, and why the antennas make it harder than it
-looks.
+## What it does
 
-## Layout
+- **Two networks, one app.** MeshCore and Meshtastic, switched with **△**. Each
+  keeps its own channels, nodes and message log.
+- **Channels of every type both networks support** — MeshCore public, hashtag and
+  private (base64 PSK); Meshtastic at every PSK length upstream accepts,
+  including unencrypted and the one-byte key index.
+- **Signed identity.** One Ed25519 key pair is the MeshCore identity. Adverts are
+  signed going out and verified coming in, and the nodes list says which is which.
+- **End-to-end direct messages on both networks**, with delivery acknowledgement
+  that proves the other side *decrypted* the message rather than merely heard the
+  frame.
+- **MeshCore route learning** — flood until the contact returns a path, then send
+  directly along it, with a retry ladder back to flooding when it stops working.
+- **Off-grid repeat** *(MeshCore)* — optionally forward other nodes' packets so a
+  handful of clients can extend each other's range with no infrastructure.
+- **A persistent node list** with per-node detail, short names, route management
+  and Meshtastic key exchange.
+- **A Finnish keyboard layer** — å ö ä where a Finnish QWERTY puts them, on a
+  keyboard whose caps say US.
+- **Session recording** to a file for diagnosing what actually happened on the
+  air, since the USB debug port is unavailable whenever the flashing port is.
 
-Components, with the dependency direction enforced by CMake `REQUIRES`:
+## Status
 
-| Component | Contents | Depends on |
-|---|---|---|
-| `mm_proto` | wire codecs for both networks — pure C, no ESP-IDF | — |
-| `mm_crypto` | channel crypto (PSA), key expansion, channel hashes | `mm_proto` |
-| `mm_domain` | the state model: channels, messages, identity, nodes, persistence | — |
-| `mm_radio` | modem settings; later the TX queue, LBT and duty-cycle gate | `tanmatsu-lora` |
-| `vendor` | third-party and standalone algorithms — currently Ed25519 | `mbedtls` |
-| `mm_net` | the per-network stacks behind `mesh_net_t` | `mm_proto` `mm_crypto` `mm_domain` `mm_radio` `vendor` |
-| `mm_ui` | framebuffer, message view, overlays, font, LEDs | `mm_domain` |
-| `main` | `app_main()` and the event loop, nothing else | all of the above |
+Working and used on the air, against real MeshCore and Meshtastic nodes on both
+sides of every feature listed above.
 
-The direction that matters: **`mm_net` does not depend on `mm_ui`.** Stacks decode
-into the domain model; the UI reads it. An earlier version had receive handlers
-calling the UI directly, and that coupling is what forced them out of the build
-the moment the UI changed shape.
+> [!WARNING]
+> **No duty-cycle enforcement yet.** 869.4–869.65 MHz is limited to 10% duty
+> cycle in the EU and nothing in this app enforces it. Treat this as lab and
+> experimental use until it does.
 
-`mm_proto` is deliberately free of ESP-IDF, FreeRTOS and BSP includes so its
-codecs stay host-testable.
+Also not implemented: message history persistence, position and telemetry
+reporting, and Meshtastic relaying — the app advertises `CLIENT_MUTE` by default
+precisely because that is the truthful role while it does not relay.
 
-The event loop in `main` owns the model and is the only thing that mutates it.
-Anything that blocks runs on its own task and reports back through a queue:
-`mm_tx` (transmitting, which blocks for the full airtime of a packet) and
-`mm_verify` (Ed25519, about a second per signature). Neither touches the model.
+## Hardware
 
-## Build and deploy
+[Tanmatsu](https://nicolaielectronics.nl/tanmatsu/) — ESP32-P4 application
+processor, ESP32-C6 radio coprocessor over SDIO, SX1262 LoRa modem, 480×800 MIPI
+DSI panel used rotated to 800×480, QWERTY keyboard via a CH32 coprocessor.
 
-Requires ESP-IDF v6.0.2 and the BadgeLink tools (see `tools/`).
+The C6 stays on stock `tanmatsu-radio` firmware, which exposes the SX1262 as a
+dumb modem over RPC. Nothing here reflashes it.
+
+## Build and install
+
+Requires **ESP-IDF v6.0.2** and the BadgeLink tools (see [`tools/`](tools/)).
 
 ```powershell
-K:\tanmatsu\tools\build.ps1                 # -> build/tanmatsu/application.bin
-K:\tanmatsu\tools\deploy.ps1 -Start         # AppFS upload over USB, then launch
+tools\build.ps1                 # -> build/tanmatsu/application.bin
+tools\deploy.ps1 -Start         # AppFS upload over USB, then launch
 ```
 
-Put the device in **BadgeLink mode** before deploying: press the violet ◇ key on
-the launcher home screen — the top-right icon changes from a bug to a USB symbol.
-In debug mode it enumerates as COM ports instead and `deploy.ps1` reports
-"Badge not found". The two USB modes are mutually exclusive, which is why this
-app reports status on screen rather than over serial.
+Put the device in **BadgeLink mode** first: press the violet ◇ key on the
+launcher home screen — the top-right icon changes from a bug to a USB symbol. In
+debug mode it enumerates as COM ports instead and `deploy.ps1` reports "Badge not
+found". The two USB modes are mutually exclusive.
 
-## Radio settings
+`assets/metadata.json` and `assets/icon32.png` are the launcher entry; regenerate
+the icon with `tools/make-icon.py` if you change it.
 
-**MeshCore** modem settings come from the shared `system` NVS namespace
-(`lora.freq`, `lora.sf`, `lora.bandwidth`, `lora.codingrate`, `lora.power`,
-`lora.preamble`, `lora.sync`, `lora.rxboost`), so the app follows whatever region
-preset is configured on the device. Falls back to EU/UK narrow:
-
-```
-869.618 MHz  SF8  BW 62.5 kHz  CR 4/8  22 dBm  preamble 8  sync 0x12  rx_boost on
-```
-
-**Meshtastic** uses the Finnish EdgeFastLow (EFL) profile:
-
-```
-channel "EdgeFastLow", PSK "AQ==" (= {0x01}, the default key)
-869.43125 MHz  SF8  BW 62.5 kHz  CR 4/8  sync 0x2B  preamble 16
-channel hash 0x55
-```
-
-The frequency is derived, not configured: EU_868 spans 869.4–869.65 MHz, which at
-62.5 kHz gives four slots, and `channel_num 1` lands at 869.4 + 62.5/2 kHz. EFL
-and LongFast cannot hear each other.
-
-`bandwidth` is a **nominal label, not a literal**: `62` selects 62.5 kHz. Passing
-`63` falls through to the driver's 125 kHz default and you hear nothing.
-
-## Channels
-
-A fresh device starts on the well-known public channel of each network, so it is
-on the air without being configured. Deleting them keeps them deleted.
-
-**MeshCore** derives the key three ways, chosen by what is typed:
-
-Tested in this order, first match wins:
-
-| Condition | Result |
-|---|---|
-| secret set: base64, 16 or 32 bytes | a private channel — any other length is rejected |
-| secret empty, name starts with `#` | a hashtag channel: key = `SHA256(name)[0:16]`, over the name *including* the `#`, so anyone who knows the name can join — that is the point |
-| secret empty | the well-known public channel |
-
-The PSK is **base64, not hex** — that is the format MeshCore clients exchange.
-The channel hash is `SHA256(key)[0]`.
-
-**Meshtastic** accepts every PSK length upstream does, and each length means
-something different:
-
-| Decoded length | Meaning |
-|---|---|
-| 0 | unencrypted — a valid configuration, not an error |
-| 1 | a key *index*, not a key: `AQ==` is `{0x01}` = the default public key, `0x00` disables encryption, and each higher index bumps the default key's last byte |
-| 2–16 | the key, zero-padded to 16 bytes (AES-128) |
-| 17–32 | the key, zero-padded to 32 bytes (AES-256) |
-
-The channel hash mixes the **name as well as the key**, so renaming a Meshtastic
-channel changes which traffic it matches. That is upstream behaviour.
-
-## Identity and signing
-
-One name and one 4-character short name serve both networks, and **transmit is
-refused until a name is set** — MeshCore carries the sender name inside the
-message text and has no other identity field, so an unnamed message is not merely
-unfriendly, it is unattributable.
-
-MeshCore has no separate node id: the Ed25519 public key *is* the identity. A
-32-byte seed is generated on first run and the key pair derived from it at every
-boot, so there is one thing to keep secret rather than three. The seed is
-generated only *after* the RFC 8032 self-test passes — the identity is permanent,
-and minting one from arithmetic that had not been proved would cost every contact
-ever made with it.
-
-Adverts are signed on transmit and verified on receive. Verification is cached
-per node and runs on the `mm_verify` task, because one check is two scalar
-multiplications and takes about a second here. The nodes list marks a verified
-node `*` and a forged one `!`.
-
-Meshtastic NodeInfo is unsigned — any node may claim any name — so nothing is
-reported for it rather than implying a check that could have been made.
-
-The Meshtastic node number is the low four bytes of the factory MAC, rendered as
-`!aabbccdd`. It never changes.
-
-## Nodes
-
-An entry is created for **any** packet heard, and enriched when a NodeInfo or a
-named advert arrives. Stored fields are what each network actually offers:
-Meshtastic gets node number, short and long name, hardware model and the
-Curve25519 DM key; MeshCore gets the public key, role and name.
-
-Announcing is automatic every 24 hours and manual from the nodes view (△), rate
-limited to once per 5 minutes — this is a duty-cycle limited band.
-
-Entries expire on last-heard: **7 days** for a node that never told us its name,
-**30 days** for one that did. An unnamed entry is little more than evidence that
-something transmitted once; a named one is a contact.
-
-Per-node actions from the detail view: **△** message, **◯** set a short name,
-**■** remove, **☁** forget the route (MeshCore), **◇** exchange info (Meshtastic).
-
-## Direct messages
-
-Both networks encrypt a conversation to the other party, so **neither can carry
-one without a key**. The picker marks each contact `e2e`, `...` while the key is
-being derived, or `no key`.
-
-**MeshCore** agrees a key from the Ed25519 identity in a node's advert, so a
-contact becomes messageable as soon as it has been heard. Delivery is
-acknowledged properly: the reply is a hash of the plaintext and the sender's key,
-which proves the recipient decrypted the message rather than merely heard the
-frame.
-
-**Meshtastic** has no such shortcut and no channel-key fallback, because current
-firmware removed both halves of one: `perhapsEncode` refuses to send a keyless
-direct message (`PKI_SEND_FAIL_PUBLIC_KEY`, *"refusing to send legacy DM"*) and
-`perhapsDecode` discards one that arrives — it decrypts it, parses it, recognises
-it as a direct message and drops it with *"Rejecting legacy DM"*. A fallback
-would produce a message that looked sent, reached nobody, and could not even be
-acknowledged, since the acknowledgement is generated after a successful decode.
-
-So a Meshtastic contact must publish a key first. **◇ in the node detail
-exchanges it** — our NodeInfo addressed to them with `want_response`, which is
-what the official app calls "exchange user info". NodeInfo is deliberately exempt
-from both rules above, which is exactly what lets it travel before any key
-exists. Incoming requests are answered the same way, at most once a day per
-asker; asking more often than that resets the window rather than shortening it.
-
-Meshtastic acknowledges with a `ROUTING` reply naming the packet it answers, sent
-only when the sender set `want_ack`.
-
-## Configuration
-
-The **bottom side button** opens it. Shared settings apply to both networks; the
-rest belong to whichever network was active when the screen was opened, and it
-stays on that one while open.
-
-| | |
-|---|---|
-| Location | latitude and longitude, optional. Once set it goes out in **every MeshCore advert** — published to everyone in range and everyone they relay to. Stored as millionths of a degree, the units the wire carries. Both coordinates or neither. |
-| Screen off | minutes of no input before the backlight goes dark, 0 = never. Backlight only: the panel and the radio keep running and messages keep arriving. The key that wakes it is swallowed. |
-| Hop limit *(MT)* | 0–5. This is the value the active limit **resets to at every start** — see below. |
-| Role *(MT)* | CLIENT or CLIENT_MUTE, advertised in NodeInfo. Defaults to CLIENT_MUTE, which is the truthful one while this app does not relay Meshtastic traffic. |
-| Off-grid repeat *(MC)* | forward other nodes' packets, so a handful of ordinary clients can give each other extra hops with no deployed infrastructure — a field day, a search, bootstrapping a mesh. Off by default, because a mesh where everyone repeats everything spends its airtime on itself. |
-
-**`fn` + `0`…`7`** sets the Meshtastic hop limit for the current session only. It
-reaches 7 where the stored setting stops at 5, on the grounds that a limit worth
-raising to get one message out is not one worth making permanent. Restarting
-returns it to the stored value.
-
-Off-grid repeat differs from the stock feature in one deliberate way: upstream
-ties it to one of three preset frequencies (433.000, 869.000 or 918.000 MHz),
-which cuts you off from a regional mesh running anywhere else while it is on.
-Here it is only a mode — the configured frequency is left alone.
-
-## Storage
-
-| What | Where | Why |
-|---|---|---|
-| channels, identity, preferences | NVS namespace `multimesh` | small, versioned, rewritten rarely |
-| identity seed | NVS key `mc.seed` | 32 bytes; the key pair is derived, never stored |
-| node tables | `/locfd/multimesh/nodes-{mc,mt}.bin` | two 48-entry tables would take about a third of the 16 KB NVS partition, which is shared with the launcher and WiFi |
-
-Records carry a version and an **unrecognised version is discarded, not
-reinterpreted**: losing settings is recoverable, silently misreading a channel key
-is not. Node files are written to a temporary file and renamed, so a power cut
-leaves the previous table intact.
-
-MeshCore radio settings are *read* from the shared `system` namespace and never
-written there — two apps fighting over one key set is how configuration
-mysteriously changes.
-
-> **Channel keys and the identity seed are stored in the clear.** That is what
-> every mesh client does: the device is the trust boundary, NVS is not encrypted,
-> and the Tanmatsu ships with secure boot permanently disabled. Anyone holding
-> the hardware has the keys. Nothing secret is committed to this repository —
-> every key that appears in the source is a published, well-known network default.
-
-## Interface
+## Using it
 
 One screen per network, showing every configured channel of that network with a
 colour-coded channel column. Switching network swaps the whole log; the channel
-selector only retargets the composer.
+selector only retargets the composer. Typing always goes to the composer — there
+is no edit mode.
 
 | Key | |
 |---|---|
@@ -264,14 +114,27 @@ selector only retargets the composer.
 | ◯ green | nodes — list, details, announce, remove |
 | ☁ blue | identity |
 | ◇ violet | channels — select, create, edit, delete |
+| bottom side button | configuration |
 | ←/→ | cursor · **↑/↓** scroll · **ctrl+↑/↓** recall sent messages |
 | fn+↑ | page up · **fn+↓** jump to latest |
 | alt+↑ | selection mode; **enter** opens message details |
+| fn+■ | start/stop session recording |
 
 Inside an overlay the same four coloured keys are relabelled on screen, so the
 hint bar is always the authority on what they do.
 
-Typing always goes to the composer — there is no edit mode.
+Per-node actions from the detail view: **△** message, **◯** set a short name,
+**■** remove, **☁** forget the route (MeshCore), **◇** exchange info (Meshtastic).
+
+### Message status
+
+An outgoing message occupies the timestamp column with its progress until it
+settles. A broadcast shows repeats as `x2`; a direct message adds the attempt,
+`x1a2` being one repeat heard on the second try. Neither network acknowledges a
+broadcast, so the delivery signal is hearing a repeater flood it back: MeshCore
+shows how many repeats were counted, Meshtastic the hop budget and last relay.
+The window is 60 seconds, after which a message that was never repeated keeps its
+timestamp in red.
 
 ### Finnish letters
 
@@ -285,82 +148,66 @@ L — so those keys are remapped and the punctuation moves to a modifier layer:
 | `;` | ö | Ö | `;` | `:` |
 | `'` | ä | Ä | `'` | `"` |
 
-Not AltGr: the BSP substitutes its own third-level table before the event
-reaches the app, so AltGr+`;` never arrives as a semicolon — it arrives as a
-combining ogonek. Fn and Ctrl leave the character alone and only set a modifier
-bit. The BSP's own AltGr+Q/W/P still produce ä å ö and are left working.
+Not AltGr: the BSP substitutes its own third-level table before the event reaches
+the app, so AltGr+`;` never arrives as a semicolon — it arrives as a combining
+ogonek. Fn and Ctrl leave the character alone and only set a modifier bit. The
+BSP's own AltGr+Q/W/P still produce ä å ö and are left working.
 
-This is app-local. The keycaps and every other app still say US; changing that
-would mean patching the BSP.
+This is app-local. The keycaps and every other app still say US.
 
-The spacebar is three switches under one bar, and the BSP reports it **twice
-over**: once as a keyboard character from the OR of all three, and again as one
-navigation event per switch. Handle both and a single press puts two to four
-spaces in the buffer. Only the keyboard event is used here — it is where every
-other printable character arrives. Spaces closer together than 120 ms are also
-treated as one press, since the OR can still edge more than once as the bar
-rocks.
+## Configuration
 
-MeshCore learns routes. A message to a contact floods the mesh until that
-contact hands back the path it took, after which it goes directly along that
-path for a fraction of the airtime. Routes are shown in the node detail and can
-be forgotten there (☁) when one stops working — with no route the next message
-floods, and a flooded message draws a fresh path return by itself.
+The **bottom side button** opens it. Shared settings apply to both networks; the
+rest belong to whichever network was active when the screen was opened, and it
+stays on that one while open.
 
-An outgoing message occupies the timestamp column with its progress until it
-settles. A broadcast shows repeats as `x2`; a direct message adds the attempt,
-`x1a2` being one repeat heard on the second try. Neither network acknowledges a broadcast, so the delivery signal is
-hearing a repeater flood it back: MeshCore shows how many repeats were counted,
-Meshtastic the hop budget and last relay. The window is 60 seconds, after which a
-message that was never repeated keeps its timestamp in red.
+| | |
+|---|---|
+| Location | latitude and longitude, optional. Once set it goes out in **every MeshCore advert** — published to everyone in range and everyone they relay to. Decimal degrees; both coordinates or neither. |
+| Screen off | minutes of no input before the backlight goes dark, 0 = never. Backlight only: the panel and the radio keep running and messages keep arriving. The key that wakes it is swallowed. |
+| Hop limit *(MT)* | 0–5. The value the active limit **resets to at every start**. |
+| Role *(MT)* | CLIENT or CLIENT_MUTE, advertised in NodeInfo. Defaults to CLIENT_MUTE. |
+| Off-grid repeat *(MC)* | forward other nodes' packets to extend the mesh. Off by default, because a mesh where everyone repeats everything spends its airtime on itself. |
 
-Received timestamps are **our own receive clock on both networks**. It is the
-only clock we control, so it is the only one that gives a stable ordering and
-cannot file a message under the wrong week because a sender's clock is adrift.
-MeshCore does carry the sender's claim, and that is kept and shown in the message
-detail — as evidence, not as the ordering key.
+**`fn` + `0`…`7`** sets the Meshtastic hop limit for the current session only. It
+reaches 7 where the stored setting stops at 5, on the grounds that a limit worth
+raising to get one message out is not one worth making permanent. Restarting
+returns it to the stored value.
 
-## Notes
+## Documentation
 
-- ESP-IDF 6.0 ships mbedtls 4.x, where `mbedtls/aes.h` and `sha256.h` are
-  private. Crypto here uses the PSA Crypto API. Upstream Tanmatsu MeshCore still
-  uses the legacy API and pins ESP-IDF 5.5.1.
-- The panel is **480×800 rotated 270°**. Lay out against
-  `pax_buf_get_width/height()` *after* setting orientation, not against what the
-  BSP reports — those are the native dimensions and will silently confine
-  everything to the wrong two-thirds of the screen.
-- `pax_draw_thick_line()` skips PAX's orientation transform and draws at
-  transposed coordinates. Use `pax_draw_line()`.
-- `wifi_connection_init_stack()` is what brings up the P4↔C6 SDIO RPC pipeline
-  the LoRa component rides on. It is called without associating to any network.
-- There is no RTC on the P4; the clock comes from the C6 coprocessor via
-  `bsp_rtc_update_time()`. Without it, message timestamps render as 1970.
-- Meshtastic AES-CTR cannot fail on a wrong key — it just yields garbage. The
-  strict protobuf parse in `mt_data_parse()` is what rejects foreign traffic, so
-  keep it strict.
-- PAX ships exactly one monospace font and it is also the only one without
-  Latin-1. `pax_font_mono_fi` bolts the six Finnish glyphs onto `sky_mono`'s own
-  letterforms; regenerate with `tools/gen_fi_glyphs.py`.
-- ESP-IDF 6.0's mbedtls declares `PSA_ALG_PURE_EDDSA` but ships no implementation
-  of it, so `components/vendor/ed25519.c` implements RFC 8032 over `mbedtls_mpi`.
-  It is not fast. It is checked against the RFC 8032 §7.1 vectors at every boot,
-  including that a flipped bit fails, before anything is allowed to depend on it.
-- A MeshCore advert signature covers `pub_key || timestamp || app_data`, and
-  receivers clamp `app_data` to 32 bytes *before* verifying. The signed region is
-  taken from the raw payload rather than re-serialised from the parsed struct: a
-  round trip would drop any field this parser does not understand, and the
-  signature would then fail against senders that include one — which looks like
-  broken crypto rather than a lossy parse.
-- Both networks flood, so every message arrives once directly and again from each
-  repeater. Dedup keys differ: Meshtastic has an `(from, id)` header pair,
-  MeshCore has no packet id but an unchanged payload, so that is fingerprinted.
+| | |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | component layout, threading, and the platform behaviour worth knowing before touching this code |
+| [docs/protocol.md](docs/protocol.md) | radio settings, channels, identity, direct messages, routing, storage |
+| [docs/second-radio-investigation.md](docs/second-radio-investigation.md) | what running both networks simultaneously would take, and why the antennas make it harder than it looks |
 
-## Not implemented yet
+## Contributing
 
-Message history persistence, position, telemetry, and a duty-cycle gate. **The
-last one matters:** 869.4–869.65 MHz is limited to 10% duty cycle and nothing
-here enforces it, so this is lab use until it does.
+Issues and pull requests are welcome. Two things worth knowing first:
 
-## License
+- `mm_proto` stays free of ESP-IDF, FreeRTOS and BSP includes, and `mm_net` never
+  depends on `mm_ui`. Both rules exist because breaking them has already cost a
+  rewrite once.
+- Protocol behaviour is checked against upstream source before it is changed.
+  Where this app deliberately differs from upstream — the off-grid repeat
+  frequency lock, for one — the difference is documented rather than silent.
 
-MIT.
+## Credits and licensing
+
+MultiMesh is licensed under the [MIT License](LICENSE).
+
+The MeshCore and Meshtastic support here is an **independent implementation from
+protocol behaviour and published documentation**. No code is derived from the
+Meshtastic firmware or any other GPL-licensed project; upstream repositories are
+consulted as references only and are excluded from this tree.
+
+Every cryptographic key that appears in this source is a published, well-known
+network default. Nothing secret is committed here.
+
+MeshCore and Meshtastic are the work and the trademarks of their respective
+projects. This is an unofficial third-party client, not affiliated with, endorsed
+by, or supported by either.
+
+Built on [BadgeTeam](https://badge.team/)'s Tanmatsu BSP, PAX graphics and
+BadgeLink tooling.
