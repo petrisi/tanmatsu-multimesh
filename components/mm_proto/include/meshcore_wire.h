@@ -97,6 +97,24 @@ uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, uint8_t p
 // is reserved, and the hops have to fit MC_MAX_PATH_SIZE.
 bool mc_path_ctrl_valid(uint8_t ctrl);
 
+// How wide a hop is in the packets we originate.
+//
+// The originator decides: repeaters append however many bytes the control byte
+// declares, and the recipient hands the whole thing back, so this alone fixes
+// the width of every route anyone learns to us.
+//
+// Two, not the protocol default of one. A hop is a prefix of a repeater's public
+// key, and one byte of it is 256 possibilities -- on a mesh of any size two
+// repeaters sharing a leading byte is ordinary rather than unlucky. A directed
+// packet is forwarded by whichever node matches the leading hop, so an ambiguous
+// hop means the wrong repeater forwards it, or several do, and a route that
+// looks perfectly good silently fails to deliver. Two bytes costs one byte per
+// hop and makes a collision remote.
+#define MC_PATH_HASH_SIZE_OURS 2
+
+// The control byte for a packet we are originating: our width, no hops yet.
+#define MC_PATH_CTRL_NEW MC_PATH_CTRL(0, MC_PATH_HASH_SIZE_OURS)
+
 // ADVERT: how a MeshCore node announces itself. There is no separate node id on
 // this network -- the Ed25519 public key *is* the identity.
 #define MC_PUB_KEY_SIZE   32

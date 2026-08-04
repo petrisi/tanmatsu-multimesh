@@ -143,7 +143,7 @@ static void queue_ack(const node_t* peer, const uint8_t hash[MC_ACK_HASH_SIZE], 
     bool direct = peer != NULL && peer->has_out_path;
     slot->length =
         mc_packet_build(MC_PAYLOAD_ACK, direct ? MC_ROUTE_DIRECT : MC_ROUTE_FLOOD,
-                        direct ? peer->out_path_ctrl : 0, direct ? peer->out_path : NULL, payload, payload_len,
+                        direct ? peer->out_path_ctrl : MC_PATH_CTRL_NEW, direct ? peer->out_path : NULL, payload, payload_len,
                         slot->frame, sizeof(slot->frame));
     slot->active = slot->length > 0;
 }
@@ -187,7 +187,7 @@ static void queue_path_return(const node_t* peer, const mc_packet_t* packet, con
 
     // Flooded, necessarily: they have no route to us yet, which is why we are
     // sending this at all.
-    slot->length = mc_packet_build(MC_PAYLOAD_PATH, MC_ROUTE_FLOOD, 0, NULL, payload, payload_len, slot->frame,
+    slot->length = mc_packet_build(MC_PAYLOAD_PATH, MC_ROUTE_FLOOD, MC_PATH_CTRL_NEW, NULL, payload, payload_len, slot->frame,
                                    sizeof(slot->frame));
     slot->active = slot->length > 0;
 }
@@ -702,7 +702,7 @@ static uint8_t meshcore_encode(mesh_state_t* mesh, uint8_t channel, const identi
     uint8_t payload_len = mc_grp_txt_build(ch->hash, mac, cipher, (uint8_t)padded, payload, sizeof(payload));
     if (payload_len == 0) return 0;
 
-    uint8_t len = mc_packet_build(MC_PAYLOAD_GRP_TXT, MC_ROUTE_FLOOD, 0, NULL, payload, payload_len, out, out_max);
+    uint8_t len = mc_packet_build(MC_PAYLOAD_GRP_TXT, MC_ROUTE_FLOOD, MC_PATH_CTRL_NEW, NULL, payload, payload_len, out, out_max);
     if (len == 0) return 0;
 
     track_transmission(payload, payload_len, msg_seq);
@@ -744,7 +744,7 @@ uint8_t mc_encode_dm_attempt(const identity_t* identity, const node_t* peer, con
 
     bool    direct = use_path && peer->has_out_path;
     uint8_t len    = mc_packet_build(MC_PAYLOAD_TXT_MSG, direct ? MC_ROUTE_DIRECT : MC_ROUTE_FLOOD,
-                                     direct ? peer->out_path_ctrl : 0, direct ? peer->out_path : NULL, payload,
+                                     direct ? peer->out_path_ctrl : MC_PATH_CTRL_NEW, direct ? peer->out_path : NULL, payload,
                                      payload_len, out, out_max);
     if (len == 0) return 0;
 
@@ -825,7 +825,7 @@ static uint8_t meshcore_encode_advert(mesh_state_t* mesh, uint8_t channel, const
     }
     memcpy(&payload[MC_ADVERT_SIGNATURE_OFFSET], signature, sizeof(signature));
 
-    uint8_t len = mc_packet_build(MC_PAYLOAD_ADVERT, MC_ROUTE_FLOOD, 0, NULL, payload, payload_len, out, out_max);
+    uint8_t len = mc_packet_build(MC_PAYLOAD_ADVERT, MC_ROUTE_FLOOD, MC_PATH_CTRL_NEW, NULL, payload, payload_len, out, out_max);
     if (len == 0) return 0;
 
     // Repeaters will flood this back at us. Remember it so our own advert is not
