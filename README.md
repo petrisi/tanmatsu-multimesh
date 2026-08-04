@@ -236,10 +236,13 @@ bit. The BSP's own AltGr+Q/W/P still produce ä å ö and are left working.
 This is app-local. The keycaps and every other app still say US; changing that
 would mean patching the BSP.
 
-The spacebar is three switches under one bar which the BSP ORs together, and it
-emits a space on every rising edge of that OR — so a single press produces two
-or three as the bar rocks and the contacts make out of step. Spaces arriving
-within 120 ms of each other are treated as the same press.
+The spacebar is three switches under one bar, and the BSP reports it **twice
+over**: once as a keyboard character from the OR of all three, and again as one
+navigation event per switch. Handle both and a single press puts two to four
+spaces in the buffer. Only the keyboard event is used here — it is where every
+other printable character arrives. Spaces closer together than 120 ms are also
+treated as one press, since the OR can still edge more than once as the bar
+rocks.
 
 An outgoing message occupies the timestamp column with its progress until it
 settles. Neither network acknowledges a broadcast, so the delivery signal is

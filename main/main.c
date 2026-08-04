@@ -297,13 +297,11 @@ static const char* finnish_layout(const char* utf8, uint32_t modifiers) {
     }
 }
 
-// The spacebar is three switches under one bar, OR'd together by the BSP, and a
-// space is emitted on every rising edge of that OR. As the bar rocks, contacts
-// make and break out of step and each transition produces another space -- which
-// is why only space does this and why key repeat is not involved.
-//
-// Mechanical bounce settles in tens of milliseconds. Anything sooner than this
-// after a space is the same press arriving again, not a second one.
+// Belt and braces after the real cause -- this app handling the bar twice --
+// was removed above. The bar is three switches, so the OR the BSP reports a
+// character from can still edge more than once if the contacts make out of step
+// as it rocks. Mechanical bounce settles in tens of milliseconds, so anything
+// sooner than this after a space is the same press arriving again.
 #define SPACE_BOUNCE_MS 120
 
 static uint32_t last_space_ms;
@@ -865,9 +863,6 @@ static void handle_editor_key(bsp_input_navigation_key_t key) {
             if (ed->field == FIELD_COLOR) ed->color = (ed->color + 1) % CH_PALETTE_SIZE;
             break;
         case BSP_INPUT_NAVIGATION_KEY_BACKSPACE: field_backspace(editor_focused_field(&max)); break;
-        case BSP_INPUT_NAVIGATION_KEY_SPACE_L:
-        case BSP_INPUT_NAVIGATION_KEY_SPACE_M:
-        case BSP_INPUT_NAVIGATION_KEY_SPACE_R: field_append(editor_focused_field(&max), max, " "); break;
         case BSP_INPUT_NAVIGATION_KEY_RETURN: editor_save(); break;
         case BSP_INPUT_NAVIGATION_KEY_F3:
             if (!ed->creating) {
@@ -899,9 +894,6 @@ static void handle_identity_key(bsp_input_navigation_key_t key) {
             model.identity.field = (model.identity.field + 1) % ID_FIELD_COUNT;
             break;
         case BSP_INPUT_NAVIGATION_KEY_BACKSPACE: field_backspace(identity_focused_field(&max)); break;
-        case BSP_INPUT_NAVIGATION_KEY_SPACE_L:
-        case BSP_INPUT_NAVIGATION_KEY_SPACE_M:
-        case BSP_INPUT_NAVIGATION_KEY_SPACE_R: field_append(identity_focused_field(&max), max, " "); break;
         case BSP_INPUT_NAVIGATION_KEY_RETURN:
             if (!identity_is_set(&model.identity)) {
                 toast("a name is required");
@@ -1254,9 +1246,11 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
             }
             break;
 
-        case BSP_INPUT_NAVIGATION_KEY_SPACE_L:
-        case BSP_INPUT_NAVIGATION_KEY_SPACE_M:
-        case BSP_INPUT_NAVIGATION_KEY_SPACE_R: composer_append(" "); break;
+        // No SPACE_L/M/R here. The bar is three switches and the BSP reports it
+        // twice over: once as a keyboard character from the OR of all three, and
+        // again as one navigation event per switch. Handling both put two to
+        // four spaces in the buffer for one press. The keyboard event is the one
+        // to keep -- it is where every other printable character arrives.
 
         default: break;
     }
