@@ -97,10 +97,18 @@ typedef struct {
     // Routing, shown in the detail view. The two networks expose different
     // things: MeshCore carries the actual path taken as a list of node-key
     // prefixes, Meshtastic only a hop budget plus the last relay.
-    uint8_t path[8];      // MeshCore: one byte per hop
-    uint8_t path_len;
-    uint8_t hop_start;    // Meshtastic: hop limit as sent
-    uint8_t hop_limit;    // Meshtastic: hops remaining on arrival
+    //
+    // A MeshCore hop is one, two or three bytes of the repeater's public key,
+    // chosen per packet -- a mesh moving to two-byte hops identifies its
+    // repeaters far less ambiguously. So the width has to travel with the bytes:
+    // without it a four-hop two-byte path reads as eight one-byte hops, which is
+    // both the wrong route and the wrong distance.
+    uint8_t path[24];        // enough for 24 one-byte, 12 two-byte or 8 three-byte hops
+    uint8_t path_len;        // bytes stored, which may be fewer than arrived
+    uint8_t path_hash_size;  // bytes per hop; 0 on rows that predate this
+    bool    path_truncated;  // the route was longer than we kept
+    uint8_t hop_start;       // Meshtastic: hop limit as sent
+    uint8_t hop_limit;       // Meshtastic: hops remaining on arrival
     char    relayed_by[8];  // short name or id of the last relay, "" if unknown
 
     bool       outgoing;

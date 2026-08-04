@@ -1030,11 +1030,22 @@ static void draw_detail(const app_model_t* model) {
         if (msg->path_len == 0) {
             snprintf(route_val, sizeof(route_val), "direct");
         } else {
-            int n = snprintf(route_val, sizeof(route_val), "%02x", msg->path[0]);
-            for (int i = 1; i < msg->path_len && n < (int)sizeof(route_val) - 4; i++) {
-                n += snprintf(route_val + n, sizeof(route_val) - n, ">%02x", msg->path[i]);
+            // One entry per hop, not per byte. A hop is one, two or three bytes
+            // of a repeater's key depending on what the sender used, so stepping
+            // a byte at a time would split every repeater on a two-byte mesh in
+            // half and double the apparent distance.
+            uint8_t width = msg->path_hash_size ? msg->path_hash_size : 1;
+            int     n     = 0;
+            for (int i = 0; i + width <= msg->path_len && n < (int)sizeof(route_val) - 12; i += width) {
+                if (i) n += snprintf(route_val + n, sizeof(route_val) - n, ">");
+                for (int b = 0; b < width; b++) {
+                    n += snprintf(route_val + n, sizeof(route_val) - n, "%02x", msg->path[i + b]);
+                }
             }
-            snprintf(route_val + n, sizeof(route_val) - n, "  (%u)", (unsigned)msg->path_len);
+            // The hop count comes from the header, so it stays right even when
+            // the route was too long to keep in full.
+            snprintf(route_val + n, sizeof(route_val) - n, "%s (%u)", msg->path_truncated ? ">..." : "",
+                     (unsigned)msg->hops);
         }
     } else {
         snprintf(route_val, sizeof(route_val), "%u of %u used", (unsigned)(msg->hop_start - msg->hop_limit),

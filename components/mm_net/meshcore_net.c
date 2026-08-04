@@ -184,6 +184,20 @@ static void detail(mesh_state_t* mesh) {
              (unsigned long)grp_txt, (unsigned long)mesh->stats.duplicates);
 }
 
+// Keep the route a packet took, along with how wide each hop is.
+//
+// A long path is truncated to whole hops rather than mid-hop: half an identifier
+// is not a shorter route, it is a wrong one. The hop count is recorded
+// separately, so a truncated path still reports the true distance.
+static void store_path(message_t* msg, const mc_packet_t* packet) {
+    msg->path_hash_size = packet->bytes_per_hop ? packet->bytes_per_hop : 1;
+
+    uint8_t room = (uint8_t)(sizeof(msg->path) / msg->path_hash_size) * msg->path_hash_size;
+    msg->path_len       = packet->path_length > room ? room : packet->path_length;
+    msg->path_truncated = msg->path_len < packet->path_length;
+    memcpy(msg->path, packet->path, msg->path_len);
+}
+
 // Ask for the shared secret with a node, once. Cheap to call repeatedly: it
 // does nothing when the secret is already known or already queued.
 static void want_secret(node_t* node, const identity_t* identity) {
@@ -266,9 +280,8 @@ static bool handle_datagram(const mc_packet_t* packet, mesh_state_t* mesh, const
         msg->sender_timestamp = decoded.timestamp;
         msg->rssi_dbm         = -(int)pkt->stats.rssi_pkt_raw / 2;
         msg->snr_db_x4        = pkt->stats.snr_pkt_raw;
-        msg->hops             = packet->hop_count;
-        msg->path_len = packet->path_length > sizeof(msg->path) ? (uint8_t)sizeof(msg->path) : packet->path_length;
-        memcpy(msg->path, packet->path, msg->path_len);
+        msg->hops = packet->hop_count;
+        store_path(msg, packet);
 
         mesh->stats.messages++;
         ESP_LOGI(TAG, "dm from %s: %s", who, decoded.text);
@@ -426,9 +439,8 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
         msg->sender_timestamp = decoded.timestamp;
         msg->rssi_dbm         = -(int)pkt->stats.rssi_pkt_raw / 2;
         msg->snr_db_x4 = pkt->stats.snr_pkt_raw;
-        msg->hops      = packet.hop_count;
-        msg->path_len  = packet.path_length > sizeof(msg->path) ? (uint8_t)sizeof(msg->path) : packet.path_length;
-        memcpy(msg->path, packet.path, msg->path_len);
+        msg->hops = packet.hop_count;
+        store_path(msg, &packet);
 
         mesh->stats.messages++;
         detail(mesh);
