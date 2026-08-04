@@ -1,133 +1,92 @@
 # Roadmap
 
-What is not built yet, and why it matters. Ordered roughly by how much it holds
-the project back rather than by how interesting it is.
+What MultiMesh cannot do yet, and what that means in practice.
 
-Nothing here is a promise of a date. Items move when the reason they were
-deferred stops applying.
+## Duty cycle
 
-## Compliance
+No duty-cycle limit is enforced. The 869.4–869.65 MHz band is capped at 10% in
+the EU, and nothing in the app tracks or restricts how much of it you have used.
+Staying within the limit is entirely your responsibility, and the app cannot help
+you judge it — which is why it is described as lab and experimental use.
 
-**Duty-cycle setting and enforcement.** 869.4–869.65 MHz is limited to 10% duty
-cycle in the EU and nothing in this app enforces it. That needs a configurable
-limit, airtime accounting per band, and a gate on the transmit path that defers
-or refuses a send that would breach it.
+## Radio settings and mesh profiles
 
-This is the single item that makes the README describe the app as lab and
-experimental use. Everything else on this list is a feature; this one is the
-difference between a toy and something that can be left running.
+Radio settings cannot be changed from the app. MeshCore follows whatever region
+preset the device is configured with; Meshtastic is fixed to EdgeFastLow. Neither
+can be retuned without a rebuild.
 
-## Configuration and mesh profiles
+Past making them editable, the aim is named profiles you can add and switch
+between — LongFast alongside EdgeFastLow and MeshCore. Still one at a time, but
+**△** becomes a picker rather than a two-way toggle.
 
-Two steps, in order.
+## Message history
 
-**Editable radio settings.** Frequency, spreading factor, bandwidth, coding
-rate, power, preamble length and sync word, editable per network. Today MeshCore
-reads the shared `system` NVS namespace so it follows whatever region preset the
-device is configured for, and the Meshtastic EdgeFastLow profile is compiled in.
-Neither can be changed from the app.
+Messages are lost at restart. Channels, identity, settings and the node list all
+survive; the conversation does not.
 
-**User-definable mesh profiles.** Named sets of those settings that can be
-added, edited and switched between, with LongFast shipping as a preset alongside
-EdgeFastLow and MeshCore. Still one radio and one profile at a time — switching
-stays a configuration change plus a single `lora_set_config()` call, exactly as
-the network switch works today.
+## Replies and reactions *(Meshtastic)*
 
-The interface consequence is worth stating up front: **△** is a two-way toggle
-because there are exactly two networks. With user-defined profiles it becomes a
-picker.
+A reply arrives looking like any other message, with nothing to show what it
+answers. A reaction arrives as a bare emoji on a line of its own. Neither can be
+sent.
 
-## Messaging
+## Emoji
 
-**Message history persistence.** Messages live in RAM and are gone at restart.
-Channels, identity, settings and the node tables all persist; this does not.
-The node tables already live on `/locfd` rather than NVS for size reasons, and
-message history would go the same way.
-
-**Replies and reactions** *(Meshtastic)*. The `Data` submessage carries
-`reply_id` (field 7, `fixed32`) naming the message being answered, and `emoji`
-(field 8) marking a payload as a reaction rather than text. This parser reads
-fields 1, 2 and 6, so both are currently skipped: an incoming reply shows as an
-ordinary message with no indication of what it answers, and a reaction shows as
-a stray emoji on its own line. Sending either is not possible at all.
-
-Worth doing together, since they are the same field pair and the same threading
-model in the message view.
-
-**Emoji and special character input.** There is no picker. The Finnish layer
-covers å ä ö and nothing else, so anything outside the keyboard's own repertoire
-cannot be typed — which also blocks sending reactions.
+Emoji can be neither displayed nor typed. The font carries ASCII and six Finnish
+letters, so an emoji in an incoming message does not render, and there is no way
+to enter one — which also means reactions will stay unsendable even once replies
+work.
 
 ## Position and telemetry
 
-**Capture position** from a phone or a USB GPS dongle, instead of typing
-coordinates into the configuration screen.
+Position can only be typed in by hand. There is no way to take it from a phone or
+a GPS dongle, Meshtastic position packets are never sent, so other people's maps
+will not show you, and no telemetry is sent either — though incoming telemetry is
+read.
 
-**Send Meshtastic position updates** (`POSITION_APP`), honouring the precision
-settings so a shared location can be deliberately coarse.
+Note that a position is published rather than merely stored: once set it goes
+into every MeshCore advert.
 
-**Telemetry reporting.** Battery, channel utilisation and air time. Received
-telemetry is already parsed and counted; none is sent.
+## Traceroute and path discovery
 
-Note that location is published, not merely stored: once set it goes out in
-every MeshCore advert, to everyone in range and everyone they relay to.
+There is no way to ask how traffic reaches a given node. Meshtastic traceroute is
+received and ignored; the MeshCore equivalent is absent.
 
-## Network visibility
+Route learning is passive: a flooded message brings back the path it travelled,
+and that path is then reused. It only ever works for nodes you have already
+messaged, so there is no way to find a route to a repeater you have never
+exchanged traffic with.
 
-**Traceroute on both networks.** Meshtastic's `TRACEROUTE_APP` (port 70) is
-currently received and skipped. MeshCore has an equivalent.
+## Mesh map
 
-This is also where **actively probing a path to a repeater we have never
-exchanged messages with** belongs — it is the same mechanism. Route learning
-today is passive: a flooded message draws a path return, which is stored and
-used directly afterwards. That works only for nodes we have already talked to.
+Advert paths, returned routes and traceroute replies all describe the shape of
+the mesh, and none of it is kept. A topology view would show what the mesh looks
+like from where you are standing.
 
-**MeshCore topology builder.** Assemble a picture of the mesh from advert paths,
-path returns and traceroute results. The data mostly arrives already; nothing
-keeps it.
+## Activity view
 
-**Activity view.** A live on-screen list of everything heard on air, on both
-networks, rather than only the traffic addressed to a channel we hold. The
-session recorder already captures exactly this — the work is presenting it as it
-happens instead of only in a file collected afterwards.
+The message log shows traffic on channels you hold keys for. Everything else
+heard on air — other channels, other people's direct messages, adverts, telemetry
+— is counted but never shown. The session recorder captures it to a file, but
+there is no live view.
 
-## Radio capacity
+## Second radio
 
-**Second radio support.** Genuine concurrency, as distinct from the profile
-switching above: two networks live at once rather than one at a time.
+One radio means one network at a time. Running MeshCore and Meshtastic together
+needs a second one.
+[second-radio-investigation.md](second-radio-investigation.md) has the analysis:
+a companion radio over serial on the CATT port is the workable option, a bare
+SX1262 needs more antenna isolation than a handheld can provide, and the
+CH341-based USB sticks contain no processor of their own and are rejected.
 
-[second-radio-investigation.md](second-radio-investigation.md) has the analysis
-already. In short: a companion radio over serial on the CATT port is the
-preferred option, a bare SX1262 on the same port is constrained by the ~40 dB of
-antenna isolation a handheld cannot provide at this frequency spacing, and the
-CH341-based USB sticks are rejected — they contain no MCU, so the host would
-have to do everything through a USB-to-SPI bridge.
+## Known limitations
 
-## Known issues and housekeeping
-
-**`mm_proto` has no host tests.** The component is deliberately free of ESP-IDF,
-FreeRTOS and BSP includes precisely so its codecs can be tested on a host, but
-there is no host compiler on the development machine. The gap is currently
-covered by boot-time self-tests against published vectors — RFC 8032 for
-Ed25519, RFC 7748 for X25519, and a hand-computed byte vector for the NodeInfo
-encoder.
-
-**RSSI is always reported as zero.** A bug in the vendor `tanmatsu-lora` driver,
-whose conversion contradicts its own documented scale. SNR is shown instead.
-Needs an upstream fix or a local workaround.
-
-**Relay slot timing is measured from processing, not reception.** `radio_poll()`
-drains up to eight frames per loop iteration, so a burst can compress the
-backoff a relayed packet was scheduled with. Small, real, and visible in a
-session log as two receive lines sharing a timestamp.
-
-**MeshCore off-grid repeat has no rate cap.** Deferred deliberately rather than
-overlooked.
-
-**`.gitattributes`.** Line endings produce a warning on every commit. Fixing it
-renormalises the whole tree, so it wants its own commit rather than riding along
-with unrelated work.
-
-**`deploy.ps1` error message.** When the BadgeLink virtual environment is
-missing it says so but does not say where to get it. That is the first thing a
-fresh clone hits, and [tools/README.md](../tools/README.md) has the answer.
+- **RSSI always reads zero.** A bug in the vendor radio driver. Signal quality is
+  shown as SNR instead.
+- **MeshCore off-grid repeat has no rate limit.** It forwards everything it hears
+  for as long as it is switched on.
+- **Relay timing is measured from when a packet is processed**, not when it
+  arrived, so a burst of traffic can shorten the backoff slightly.
+- **`mm_proto` has no host tests.** Correctness rests on self-checks that run at
+  every boot against published vectors — RFC 8032 for Ed25519, RFC 7748 for
+  X25519, and a fixed byte vector for the NodeInfo encoder.

@@ -1,7 +1,7 @@
 # Architecture
 
 Why the app is shaped the way it is, how the components fit together, and the
-platform behaviour that cost the most time to discover.
+platform constraints worth knowing before changing any of it.
 
 ## Why both stacks run on the P4
 
@@ -40,12 +40,11 @@ Dependency direction is enforced by CMake `REQUIRES`:
 | `main` | `app_main()` and the event loop, nothing else | all of the above |
 
 The direction that matters: **`mm_net` does not depend on `mm_ui`.** Stacks decode
-into the domain model; the UI reads it. An earlier version had receive handlers
-calling the UI directly, and that coupling is what forced them out of the build
-the moment the UI changed shape.
+into the domain model and the UI reads it, so a change to the display cannot
+reach the protocol code.
 
 `mm_proto` is deliberately free of ESP-IDF, FreeRTOS and BSP includes so its
-codecs stay host-testable.
+codecs stay testable away from the hardware.
 
 ## Threading
 
@@ -60,16 +59,14 @@ Neither touches the model. Results are drained by the loop and applied there.
 ## Session logging
 
 `fn` + **■** starts and stops a recording to `/locfd/multimesh/session.log`:
-raw frames in and out, decode decisions, path and acknowledgement handling. It
-is meant to be short-lived — record a session, leave the app, put the device in
-BadgeLink mode, and pull the file with `tools/fetch-log.ps1`. Enough of the
-receive path is logged that a delivery failure can be diagnosed from the file
-alone rather than from a description of what the screen showed.
+raw frames in and out, decode decisions, and path and acknowledgement handling.
+It is meant to be short-lived — record a session, leave the app, put the device
+in BadgeLink mode, and pull the file with `tools/fetch-log.ps1`. The receive path
+is logged in enough detail to diagnose a delivery failure from the file alone.
 
 ## Platform notes
 
-Things that are true of this hardware and toolchain, collected because each one
-cost real time:
+Constraints of this hardware and toolchain, each of which shapes code above it:
 
 - ESP-IDF 6.0 ships mbedtls 4.x, where `mbedtls/aes.h` and `sha256.h` are
   private. Crypto here uses the PSA Crypto API. Upstream Tanmatsu MeshCore still

@@ -50,7 +50,7 @@ order, first match wins:
 | Condition | Result |
 |---|---|
 | secret set: base64, 16 or 32 bytes | a private channel — any other length is rejected |
-| secret empty, name starts with `#` | a hashtag channel: key = `SHA256(name)[0:16]`, over the name *including* the `#`, so anyone who knows the name can join — that is the point |
+| secret empty, name starts with `#` | a hashtag channel: key = `SHA256(name)[0:16]`, over the name *including* the `#`, so knowing the name is enough to join |
 | secret empty | the well-known public channel |
 
 The PSK is **base64, not hex** — that is the format MeshCore clients exchange.
@@ -216,7 +216,7 @@ that moved it would make every node downstream misjudge how far away the sender
 is. `relay_node` is the low byte of our node number, which upstream also sets on
 its own transmissions and not only when forwarding.
 
-**The backoff is the interesting part.** Every node in earshot hears a packet in
+The backoff is weighted, not uniform. Every node in earshot hears a packet in
 the same instant, so they must be scattered — and Meshtastic scatters them *by
 received signal strength, deliberately the wrong way round*. A strong signal
 means the sender is close, which means relaying adds little coverage, so a strong
@@ -251,10 +251,10 @@ do not hold — has no portnum to judge, so it is relayed normally; dropping it
 would stop us carrying every DM on the mesh, and upstream's `CORE_PORTNUMS_ONLY`
 makes the same choice.
 
-Not decrementing is a deliberate divergence with a cost worth stating: nodes
-downstream will underestimate how far away the sender is, and a message's reach
-is no longer bounded by the hop count its sender chose. It still terminates —
-dedup means each node relays a given `(from, id)` at most once — but it travels
+Not decrementing diverges from upstream and has two consequences: nodes
+downstream underestimate how far away the sender is, and a message's reach is no
+longer bounded by the hop count its sender chose. It still terminates — dedup
+means each node relays a given `(from, id)` at most once — but it travels
 further than a plain mesh would carry it.
 
 ### MeshCore off-grid repeat
@@ -289,8 +289,7 @@ leaves the previous table intact. The node struct's field order *is* the on-disk
 order — reordering it requires bumping the file version.
 
 MeshCore radio settings are *read* from the shared `system` namespace and never
-written there — two apps fighting over one key set is how configuration
-mysteriously changes.
+written there, so this app cannot change what other apps on the device see.
 
 > **Channel keys and the identity seed are stored in the clear.** That is what
 > every mesh client does: the device is the trust boundary, NVS is not encrypted,
@@ -303,10 +302,8 @@ mysteriously changes.
   strict protobuf parse in `mt_data_parse()` is what rejects foreign traffic, so
   keep it strict.
 - `User.public_key` is protobuf field **8**, `bytes`, exactly 32 long. Omitting
-  it is invisible locally and shows up on every other radio as "no key provided",
-  so `mt_wire_selftest()` checks the encoder against a hand-computed byte vector
-  at boot — there is no host compiler on the development machine to run a proper
-  unit test.
+  it is invisible locally and appears on every other radio as "no key provided",
+  so `mt_wire_selftest()` checks the encoder against a fixed byte vector at boot.
 - Received timestamps are **our own receive clock on both networks**. It is the
   only clock we control, so it is the only one that gives a stable ordering and
   cannot file a message under the wrong week because a sender's clock is adrift.

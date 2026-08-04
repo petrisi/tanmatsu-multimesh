@@ -9,10 +9,9 @@ handheld — MeshCore and Meshtastic in one app, switched with a single keypress
 
 <img width="1252" height="1663" alt="image" src="https://github.com/user-attachments/assets/7438b4d9-3da7-41f9-be3d-02092a70fa37" />
 
-Both protocol stacks are implemented from the wire up in application code on the
-ESP32-P4, so the C6 radio coprocessor keeps its stock firmware and changing
-network is a config change and one `lora_set_config()` call — no reboot, no
-reflash.
+Both protocol stacks are implemented from the wire up in application code, so the
+radio coprocessor keeps its stock firmware and switching between the two networks
+takes neither a reboot nor a reflash.
 
 ---
 
@@ -31,15 +30,14 @@ reflash.
 - **MeshCore route learning** — flood until the contact returns a path, then send
   directly along it, with a retry ladder back to flooding when it stops working.
 - **Relaying on both networks** *(experimental)* — MeshCore off-grid repeat, and
-  a Meshtastic CLIENT that really does forward for others, with SNR-weighted
-  backoff. Meant for temporarily holding a group together from a high spot, not
-  for standing in for a permanent node.
+  a Meshtastic CLIENT that forwards for others. Meant for temporarily holding a
+  group together from a high spot, not for standing in for a permanent node.
 - **A persistent node list** with per-node detail, short names, route management
   and Meshtastic key exchange.
 - **A Finnish keyboard layer** — å ö ä where a Finnish QWERTY puts them, on a
   keyboard whose caps say US.
-- **Session recording** to a file for diagnosing what actually happened on the
-  air, since the USB debug port is unavailable whenever the flashing port is.
+- **Session recording** to a file, so a problem on the air can be diagnosed
+  afterwards rather than described from memory.
 
 ## Status
 
@@ -111,11 +109,8 @@ Per-node actions from the detail view: **△** message, **◯** set a short name
 **←/→** move to the previous or next node without going back to the list, and
 **↑/↓** jump to the first or last. The title shows your position.
 
-The selection follows the *node*, not the row it happened to be on. The list is
-sorted by last-heard and resorts whenever anything transmits, so a row number
-means a different node from one second to the next — and since the detail view
-resolves its actions when you press the key, that once meant you could remove or
-message a node you were not looking at.
+The list is ordered by when each node was last heard, so it reorders as traffic
+arrives. The detail view stays on the node you opened.
 
 ### Message status
 
@@ -139,12 +134,12 @@ L — so those keys are remapped and the punctuation moves to a modifier layer:
 | `;` | ö | Ö | `;` | `:` |
 | `'` | ä | Ä | `'` | `"` |
 
-Not AltGr: the BSP substitutes its own third-level table before the event reaches
-the app, so AltGr+`;` never arrives as a semicolon — it arrives as a combining
-ogonek. Fn and Ctrl leave the character alone and only set a modifier bit. The
-BSP's own AltGr+Q/W/P still produce ä å ö and are left working.
+Fn and Ctrl are the modifier keys rather than AltGr, which the firmware claims
+for its own accent layer. AltGr+Q/W/P still produce ä å ö as they do elsewhere on
+the device.
 
-This is app-local. The keycaps and every other app still say US.
+The remapping applies only inside MultiMesh. The keycaps and every other app
+still say US.
 
 ## Configuration
 
@@ -158,8 +153,8 @@ stays on that one while open.
 | Screen off | minutes of no input before the backlight goes dark, 0 = never. Backlight only: the panel and the radio keep running and messages keep arriving. The key that wakes it is swallowed. |
 | Hop limit *(MT)* | 0–5. The value the active limit **resets to at every start**. |
 | Role *(MT)* | CLIENT or CLIENT_MUTE, advertised in NodeInfo. CLIENT forwards other nodes' packets; CLIENT_MUTE listens only, and is the default. |
-| Always repeat *(MT, CLIENT only)* | repeat even when another node already did, going last so we only add coverage nobody else provided. This is upstream's ROUTER_LATE behaviour without the router's early slot. |
-| Optimize text *(MT, CLIENT only)* | carry only text messages and acknowledgements, and let them keep their hop limit. Traffic we cannot decrypt is relayed normally — it has no readable type to judge. |
+| Always repeat *(MT, CLIENT only)* | repeat even when another node already has, transmitting last so you only add coverage nobody else provided. |
+| Optimize text *(MT, CLIENT only)* | carry only text messages and acknowledgements, and let them keep their hop limit. Traffic that cannot be decrypted is carried normally, since its type is unreadable. |
 | Off-grid repeat *(MC)* | forward other nodes' packets to extend the mesh. Off by default, because a mesh where everyone repeats everything spends its airtime on itself. |
 
 The two Meshtastic relay settings are shown only at role CLIENT, since at
@@ -182,10 +177,9 @@ forwarded, per network.
 > repeater, and a mesh where every client repeats everything spends its airtime
 > on itself. If there is already a repeater covering you, leave both off.
 
-**`fn` + `0`…`7`** sets the Meshtastic hop limit for the current session only. It
-reaches 7 where the stored setting stops at 5, on the grounds that a limit worth
-raising to get one message out is not one worth making permanent. Restarting
-returns it to the stored value.
+**`fn` + `0`…`7`** sets the Meshtastic hop limit for the current session only,
+reaching 7 where the stored setting stops at 5. Restarting returns it to the
+stored value.
 
 ## Documentation
 
@@ -200,9 +194,9 @@ returns it to the stored value.
 
 Issues and pull requests are welcome. Two things worth knowing first:
 
-- `mm_proto` stays free of ESP-IDF, FreeRTOS and BSP includes, and `mm_net` never
-  depends on `mm_ui`. Both rules exist because breaking them has already cost a
-  rewrite once.
+- `mm_proto` stays free of ESP-IDF, FreeRTOS and BSP includes, so its codecs can
+  be tested away from the hardware, and `mm_net` never depends on `mm_ui`, so the
+  protocol stacks stay independent of the display.
 - Protocol behaviour is checked against upstream source before it is changed.
   Where this app deliberately differs from upstream — the off-grid repeat
   frequency lock, for one — the difference is documented rather than silent.
