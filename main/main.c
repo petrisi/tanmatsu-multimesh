@@ -14,6 +14,7 @@
 #include "bsp/device.h"
 #include "bsp/display.h"
 #include "bsp/input.h"
+#include "bsp/power.h"
 #include "bsp/rtc.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -317,6 +318,31 @@ static void composer_send(void) {
 
     mesh->pinned = true;  // jump back to live on send
     mesh->unseen = 0;
+}
+
+// --- power ---------------------------------------------------------------
+
+// Reading the gauge is an I2C round trip to the coprocessor, so it is polled on
+// an interval rather than every frame. Ten seconds is far finer than a battery
+// moves.
+#define POWER_POLL_MS 10000
+
+static bool poll_power(void) {
+    static uint32_t next_poll_ms = 0;
+    if (now_ms() < next_poll_ms) return false;
+    next_poll_ms = now_ms() + POWER_POLL_MS;
+
+    bsp_power_battery_information_t info;
+    if (bsp_power_get_battery_information(&info) != ESP_OK) return false;
+
+    int  percent  = (int)(info.remaining_percentage + 0.5);
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+
+    bool changed = (percent != model.battery_pct) || (info.battery_charging != model.charging);
+    model.battery_pct = percent;
+    model.charging    = info.battery_charging;
+    return changed;
 }
 
 // --- navigation ----------------------------------------------------------
@@ -938,6 +964,7 @@ void app_main(void) {
 
         if (radio_poll()) dirty = true;
         if (drain_tx_events()) dirty = true;
+        if (poll_power()) dirty = true;
         if (tx_settle()) dirty = true;
         leds_tick();
 
