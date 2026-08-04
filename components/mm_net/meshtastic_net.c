@@ -393,6 +393,38 @@ typedef struct {
     uint32_t portnum;
 } relay_view_t;
 
+// Every packet heard, with the header fields a relay decision turns on. Without
+// this the decisions below are unreadable after the fact: a packet that is
+// simply out of hops and one that was never considered look identical, which is
+// exactly the ambiguity that made the first recorded session only half
+// explicable.
+static void log_rx(const mt_packet_t* p, float snr, uint8_t len, bool duplicate, const relay_view_t* view) {
+    if (!session_log_active()) return;
+
+    // What we managed to make of the payload. "opaque" is a real answer rather
+    // than a failure: it is how a direct message for somebody else looks, and
+    // it is what decides whether "optimize for text" may judge the packet.
+    char port[12];
+    if (duplicate) {
+        snprintf(port, sizeof(port), "dup");
+    } else if (view->decoded) {
+        snprintf(port, sizeof(port), "%lu", (unsigned long)view->portnum);
+    } else {
+        snprintf(port, sizeof(port), "opaque");
+    }
+
+    session_log("rx.mt from=%08lx to=%08lx id=%08lx hops=%u/%u ch=%02x nh=%02x relay=%02x ack=%u snr=%d len=%u port=%s",
+                (unsigned long)p->from, (unsigned long)p->to, (unsigned long)p->id, (unsigned)p->hop_limit,
+                (unsigned)p->hop_start, (unsigned)p->channel_hash, (unsigned)p->next_hop, (unsigned)p->relay_node,
+                p->want_ack ? 1u : 0u, (int)snr, (unsigned)len, port);
+}
+
+// Why a packet was not relayed. Every exit says something, because a silent one
+// is indistinguishable from a bug.
+static void relay_skip(uint32_t id, const char* reason) {
+    session_log("relay.skip id=%08lx reason=%s", (unsigned long)id, reason);
+}
+
 // Decide whether a heard packet goes back on the air, and queue it if so.
 //
 // The hard rules are upstream's and hold in every mode: never a packet
@@ -400,15 +432,30 @@ typedef struct {
 // we have relayed before, and never the reserved non-LoRa broadcast.
 static void maybe_relay(const mt_packet_t* packet, const uint8_t* frame, uint8_t frame_len, float snr,
                         const identity_t* identity, const relay_view_t* view) {
+    // The only exit that stays quiet: with relaying off, saying so about every
+    // packet heard would bury the log in the answer to a question nobody asked.
     if (!relay_enabled) return;
-    if (packet->id == 0) return;                            // not a floodable id
-    if (packet->to == identity->node_num) return;           // ours to read, not to carry
-    if (packet->from == identity->node_num) return;         // our own, echoed back
-    if (packet->to == MT_ADDR_BROADCAST_NO_LORA) return;    // explicitly not for the air
-    if (packet->hop_limit == 0) return;                     // out of hops
-    // Routed delivery names one relay; if it is not us, staying quiet is the
-    // whole point of the field.
-    if (packet->next_hop != MT_NEXT_HOP_NONE && packet->next_hop != (uint8_t)identity->node_num) return;
+
+    const char* refuse = NULL;
+    if (packet->id == 0) {
+        refuse = "no_id";  // not a floodable id
+    } else if (packet->to == identity->node_num) {
+        refuse = "to_us";
+    } else if (packet->from == identity->node_num) {
+        refuse = "from_us";
+    } else if (packet->to == MT_ADDR_BROADCAST_NO_LORA) {
+        refuse = "no_lora";
+    } else if (packet->hop_limit == 0) {
+        refuse = "no_hops";
+    } else if (packet->next_hop != MT_NEXT_HOP_NONE && packet->next_hop != (uint8_t)identity->node_num) {
+        // Routed delivery names one relay; if it is not us, staying quiet is
+        // the whole point of the field.
+        refuse = "next_hop";
+    }
+    if (refuse != NULL) {
+        relay_skip(packet->id, refuse);
+        return;
+    }
 
     bool decrement = true;
     if (relay_opt_text) {
@@ -430,7 +477,10 @@ static void maybe_relay(const mt_packet_t* packet, const uint8_t* frame, uint8_t
 
     uint8_t out[MT_HEADER_SIZE + MT_MAX_PAYLOAD_SIZE];
     uint8_t len = mt_packet_relay(frame, frame_len, (uint8_t)identity->node_num, decrement, out, sizeof(out));
-    if (len == 0) return;
+    if (len == 0) {
+        relay_skip(packet->id, "unframeable");
+        return;
+    }
 
     for (int i = 0; i < MT_MAX_PENDING_REPEATS; i++) {
         if (repeats[i].active) continue;
@@ -689,11 +739,17 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         // confirmation available for a broadcast.
         credit_repeat(mesh, packet.from, packet.id);
 
+        relay_view_t none = {0};
+        log_rx(&packet, snr, pkt->length, true, &none);
+
         // Somebody relayed something we are still holding. Take the better copy
         // if this one has travelled less far, then either stand down or move to
         // the back of the queue depending on the mode.
         relay_maybe_upgrade(packet.from, packet.id, pkt->data, pkt->length, packet.hop_limit);
         relay_heard_dupe(packet.from, packet.id);
+        // Said even when nothing was queued, so that "we had already relayed
+        // this" is visible rather than inferred from an absence.
+        if (relay_enabled) relay_skip(packet.id, "dupe");
 
         // A retransmission addressed to us still has to be answered. Meshtastic
         // reuses the packet id when it retries, so this is exactly the traffic
@@ -767,10 +823,17 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         if (!view.decoded) mesh->stats.not_our_channel++;
     }
 
-    // Last, and only for traffic we have not seen before: a duplicate has
-    // already been relayed once, and relaying it again is what a mesh does to
-    // itself when nobody counts.
-    if (!duplicate) maybe_relay(&packet, pkt->data, pkt->length, snr, identity, &view);
+    // Logged after the decode so one line carries both what arrived and what we
+    // made of it, and before the relay decision so the reasons below read in
+    // the order they were reached.
+    if (!duplicate) {
+        log_rx(&packet, snr, pkt->length, false, &view);
+
+        // Only for traffic we have not seen before: a duplicate has already
+        // been relayed once, and relaying it again is what a mesh does to
+        // itself when nobody counts.
+        maybe_relay(&packet, pkt->data, pkt->length, snr, identity, &view);
+    }
 
     detail(mesh);
     return shown;
