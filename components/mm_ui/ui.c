@@ -1630,7 +1630,7 @@ static void draw_settings(const app_model_t* model) {
     setting_field_t fields[SET_FIELD_COUNT];
     int             count = settings_visible_fields(model->active, fields, SET_FIELD_COUNT);
 
-    float bw = 50 * CHAR_W;
+    float bw = 52 * CHAR_W;
     float bh = LINE_H * (count + 8) + 12;
     float bx, by;
 
@@ -1638,8 +1638,12 @@ static void draw_settings(const app_model_t* model) {
     snprintf(title, sizeof(title), "Settings - %s", mesh->name);
     overlay_box(bw, bh, &bx, &by, mesh->accent, title);
 
-    float y  = by + 8 + LINE_H * 1.5f;
-    float vx = bx + 14 + 13 * CHAR_W;
+    float y = by + 8 + LINE_H * 1.5f;
+    // Wide enough for the longest label with a gap after it. The values are all
+    // short -- "CLIENT_MUTE" and a signed coordinate are the biggest -- so the
+    // column can afford to fit the names rather than the names being cut to fit
+    // the column.
+    float vx = bx + 14 + 17 * CHAR_W;
 
     for (int i = 0; i < count; i++, y += LINE_H) {
         // The network's own settings are separated from the shared ones, so it
