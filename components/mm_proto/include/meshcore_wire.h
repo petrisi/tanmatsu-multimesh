@@ -75,11 +75,27 @@ bool mc_grp_txt_parse(const uint8_t* payload, uint8_t size, mc_grp_txt_t* out);
 uint8_t mc_grp_txt_build(uint8_t channel_hash, const uint8_t mac[MC_CIPHER_MAC_SIZE], const uint8_t* cipher,
                          uint8_t cipher_len, uint8_t* out, size_t out_max);
 
-// Assemble a complete frame for transmission. Originated messages carry no path
-// (zero hops); repeaters append to it as the packet travels.
+// Assemble a complete frame for transmission.
+//
+// `path_ctrl` is the packed hop control byte -- count in bits 0-5, bytes per hop
+// minus one in bits 6-7 -- and `path` the hops themselves. Pass 0 and NULL to
+// originate a flooded packet, which starts with no path and collects one as
+// repeaters append themselves. A directed packet carries the route it should
+// take, and each repeater strips itself off the front as it forwards.
+//
 // Returns the frame length, or 0 if it will not fit.
-uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, const uint8_t* payload, uint8_t payload_len,
-                        uint8_t* out, size_t out_max);
+uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, uint8_t path_ctrl, const uint8_t* path,
+                        const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max);
+
+// Hops and bytes-per-hop packed into the one control byte the wire uses.
+#define MC_PATH_CTRL(count, hash_size) ((uint8_t)((((hash_size) - 1) << 6) | ((count) & 0x3F)))
+#define MC_PATH_COUNT(ctrl)            ((uint8_t)((ctrl) & 0x3F))
+#define MC_PATH_HASH_SIZE(ctrl)        ((uint8_t)(((ctrl) >> 6) + 1))
+#define MC_PATH_BYTES(ctrl)            ((uint8_t)(MC_PATH_COUNT(ctrl) * MC_PATH_HASH_SIZE(ctrl)))
+
+// True when a control byte describes a path that can actually exist: hash size 4
+// is reserved, and the hops have to fit MC_MAX_PATH_SIZE.
+bool mc_path_ctrl_valid(uint8_t ctrl);
 
 // ADVERT: how a MeshCore node announces itself. There is no separate node id on
 // this network -- the Ed25519 public key *is* the identity.
@@ -175,6 +191,40 @@ uint8_t mc_datagram_build(uint8_t dest_hash, uint8_t src_hash, const uint8_t mac
 uint8_t mc_ack_build(const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t extended_attempt, uint8_t nonce, uint8_t* out,
                      size_t out_max);
 bool    mc_ack_parse(const uint8_t* payload, uint8_t size, uint8_t out_hash[MC_ACK_HASH_SIZE]);
+
+// --- returned paths ------------------------------------------------------
+//
+// How MeshCore discovers routes. Nothing is learned passively: a node that
+// receives a flooded message hands the route back explicitly, in a PATH packet
+// addressed and encrypted exactly like a direct message. The path it returns is
+// the one the flood accumulated on the way in -- repeaters append themselves --
+// and it needs no reversing, because a path is ordered sender to recipient and
+// repeaters carry traffic both ways.
+//
+// An acknowledgement usually rides along in the `extra` field, so a single
+// packet both confirms the message and teaches the route.
+//
+// Decrypted plaintext:  path_ctrl[1] | path[...] | extra_type[1] | extra[...]
+
+typedef struct {
+    uint8_t path_ctrl;
+    uint8_t path[MC_MAX_PATH_SIZE];
+    uint8_t path_bytes;
+    uint8_t extra_type;
+    uint8_t extra[MC_MAX_PAYLOAD_SIZE];
+    uint8_t extra_len;
+} mc_path_msg_t;
+
+bool mc_path_parse(const uint8_t* plain, size_t len, mc_path_msg_t* out);
+
+// Frame the plaintext of a PATH packet. `extra` may be NULL, in which case a
+// dummy type and four random bytes are written instead -- upstream does this so
+// two otherwise identical returns hash differently and neither is suppressed in
+// transit. `nonce` supplies those bytes, since this file draws no randomness.
+//
+// Returns the length before padding, or 0 if it will not fit.
+size_t mc_path_frame(uint8_t path_ctrl, const uint8_t* path, uint8_t extra_type, const uint8_t* extra,
+                     size_t extra_len, uint32_t nonce, uint8_t* out, size_t out_max);
 
 const char* mc_role_name(mc_role_t role);
 

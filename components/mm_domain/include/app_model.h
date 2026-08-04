@@ -35,6 +35,15 @@
 #define ID_NAME_MAX  23
 #define ID_SHORT_MAX 4
 
+// A public key, which on MeshCore is also the node's identity. Declared here
+// rather than beside the other node constants because a message has to remember
+// which key it was sent to, and messages are declared first.
+#define NODE_KEY_LEN 32
+
+// MeshCore's MAX_PATH_SIZE. Every legal route fits: 63 one-byte hops, 32
+// two-byte or 21 three-byte, and the protocol rejects anything longer.
+#define NODE_PATH_MAX 64
+
 // Channel colours are chosen from a fixed palette so every channel is visually
 // distinct and the editor can offer them as a row of swatches.
 #define CH_PALETTE_SIZE 6
@@ -125,7 +134,15 @@ typedef struct {
     bool     dm;
     char     peer[SENDER_MAX];
     bool     acked;      // the recipient proved it decrypted this
-    uint32_t expected_ack;  // MeshCore: the hash that would prove it
+    uint32_t expected_ack;  // the hash, or packet id, that would prove it
+
+    // What a resend needs. MeshCore direct messages are retried along a stored
+    // route before giving up on it, and a retry has to be re-encrypted to the
+    // same key -- so the recipient is held by identity rather than by a node
+    // index that pruning would invalidate.
+    uint8_t dm_peer_key[NODE_KEY_LEN];
+    uint8_t dm_attempt;  // bumped per retry; it is inside the signed plaintext
+    bool    dm_direct;   // this attempt used a stored route rather than flooding
 } message_t;
 
 // Receive counters, kept per network. `detail` is a short free-form breakdown
@@ -142,7 +159,6 @@ typedef struct {
 #define NODE_NAME_MAX  39
 #define NODE_SHORT_MAX 7
 #define MAX_NODES      48
-#define NODE_KEY_LEN   32
 
 // Whether the name attached to a node is actually proven to belong to it.
 //
@@ -192,6 +208,18 @@ typedef struct {
     uint8_t shared_secret[NODE_KEY_LEN];
     bool    has_secret;
     bool    secret_pending;  // queued for derivation; not persisted as such
+
+    // MeshCore: the route to this node, learned when it hands one back. Sending
+    // along it costs a fraction of the airtime of flooding the whole mesh.
+    //
+    // Kept because it is a claim about the world that stops being true without
+    // warning -- a repeater moves or dies and the route silently stops working.
+    // So it is discarded on repeated failure, and that discarding is written to
+    // disk too: rediscovering by flood is cheap, while retrying a dead route
+    // every time is not.
+    uint8_t out_path[NODE_PATH_MAX];
+    uint8_t out_path_ctrl;  // packed hop count and width; 0 when there is none
+    bool    has_out_path;
 
     int     rssi_dbm;  // of the last packet heard from it
     int     snr_db_x4;

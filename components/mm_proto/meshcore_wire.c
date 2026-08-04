@@ -85,22 +85,92 @@ uint8_t mc_grp_txt_build(uint8_t channel_hash, const uint8_t mac[MC_CIPHER_MAC_S
     return (uint8_t)total;
 }
 
-uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, const uint8_t* payload, uint8_t payload_len,
-                        uint8_t* out, size_t out_max) {
+bool mc_path_ctrl_valid(uint8_t ctrl) {
+    if (MC_PATH_HASH_SIZE(ctrl) == 4) return false;  // reserved
+    return MC_PATH_BYTES(ctrl) <= MC_MAX_PATH_SIZE;
+}
+
+uint8_t mc_packet_build(mc_payload_type_t type, mc_route_type_t route, uint8_t path_ctrl, const uint8_t* path,
+                        const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max) {
     if (out == NULL || payload == NULL) return 0;
     if (payload_len > MC_MAX_PAYLOAD_SIZE) return 0;
+    if (!mc_path_ctrl_valid(path_ctrl)) return 0;
 
-    // header + path control byte + payload. A packet we originate has no path,
-    // so no transport codes and no hop bytes.
-    size_t total = 1 + 1 + payload_len;
+    uint8_t path_bytes = MC_PATH_BYTES(path_ctrl);
+    if (path_bytes > 0 && path == NULL) return 0;
+
+    // header + path control byte + path + payload. No transport codes: those
+    // belong to the scoped routes, which we neither originate nor forward.
+    size_t total = 1 + 1 + path_bytes + payload_len;
     if (total > out_max) return 0;
 
     out[0] = (uint8_t)(((route & HDR_ROUTE_MASK) << HDR_ROUTE_SHIFT) | ((type & HDR_TYPE_MASK) << HDR_TYPE_SHIFT));
-    // Upper two bits are bytes-per-hop minus one, lower six the hop count: one
-    // byte per hop, zero hops so far.
-    out[1] = 0x00;
-    memcpy(&out[2], payload, payload_len);
+    out[1] = path_ctrl;
+    if (path_bytes) memcpy(&out[2], path, path_bytes);
+    memcpy(&out[2 + path_bytes], payload, payload_len);
     return (uint8_t)total;
+}
+
+bool mc_path_parse(const uint8_t* plain, size_t len, mc_path_msg_t* out) {
+    if (plain == NULL || out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    if (len < 1) return false;
+
+    out->path_ctrl = plain[0];
+    if (!mc_path_ctrl_valid(out->path_ctrl)) return false;
+
+    out->path_bytes = MC_PATH_BYTES(out->path_ctrl);
+    if (1 + (size_t)out->path_bytes > len) return false;
+    memcpy(out->path, &plain[1], out->path_bytes);
+
+    // Everything after the path is optional: a return with nothing to add still
+    // teaches the route.
+    size_t pos = 1 + (size_t)out->path_bytes;
+    if (pos >= len) return true;
+
+    // The upper nibble of the type byte is reserved.
+    out->extra_type = (uint8_t)(plain[pos++] & 0x0F);
+
+    size_t remaining = len - pos;
+    if (remaining > sizeof(out->extra)) remaining = sizeof(out->extra);
+    memcpy(out->extra, &plain[pos], remaining);
+    out->extra_len = (uint8_t)remaining;
+    return true;
+}
+
+size_t mc_path_frame(uint8_t path_ctrl, const uint8_t* path, uint8_t extra_type, const uint8_t* extra,
+                     size_t extra_len, uint32_t nonce, uint8_t* out, size_t out_max) {
+    if (out == NULL) return 0;
+    if (!mc_path_ctrl_valid(path_ctrl)) return 0;
+
+    uint8_t path_bytes = MC_PATH_BYTES(path_ctrl);
+    if (path_bytes > 0 && path == NULL) return 0;
+
+    size_t needed = 1 + (size_t)path_bytes + 1 + (extra_len > 0 ? extra_len : 4);
+    if (needed > out_max || needed > MC_MAX_PAYLOAD_SIZE) return 0;
+
+    size_t pos = 0;
+    out[pos++] = path_ctrl;
+    if (path_bytes) {
+        memcpy(&out[pos], path, path_bytes);
+        pos += path_bytes;
+    }
+
+    if (extra_len > 0 && extra != NULL) {
+        out[pos++] = extra_type;
+        memcpy(&out[pos], extra, extra_len);
+        pos += extra_len;
+    } else {
+        // No payload to carry, so pad with a dummy type and four random bytes.
+        // Without them two returns over the same route would be byte-identical
+        // and the second would be dropped as a duplicate before it arrived.
+        out[pos++] = 0xFF;
+        out[pos++] = (uint8_t)nonce;
+        out[pos++] = (uint8_t)(nonce >> 8);
+        out[pos++] = (uint8_t)(nonce >> 16);
+        out[pos++] = (uint8_t)(nonce >> 24);
+    }
+    return pos;
 }
 
 // Advert flag byte: the low nibble is the role, the high bits say which optional

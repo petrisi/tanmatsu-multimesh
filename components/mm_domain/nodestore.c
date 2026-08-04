@@ -20,8 +20,9 @@ static const char TAG[] = "nodestore";
 // than reinterpreted.
 // v2 added the MeshCore signature verdict to node_t.
 // v3 added the cached direct-message shared secret.
+// v4 added the learned MeshCore route.
 #define NODEFILE_MAGIC   0x4D4D4E44u  // "MMND"
-#define NODEFILE_VERSION 3
+#define NODEFILE_VERSION 4
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;

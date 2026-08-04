@@ -13,6 +13,7 @@
 #include "esp_random.h"
 #include "mesh_net.h"
 #include "meshcore_crypto.h"
+#include "meshcore_net.h"
 #include "meshcore_wire.h"
 #include "radio_cfg.h"
 
@@ -102,21 +103,76 @@ typedef struct {
 
 static pending_ack_t acks[MAX_PENDING_ACKS];
 
-static void queue_ack(const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t extended_attempt) {
+static pending_ack_t* free_ack_slot(void) {
+    for (int i = 0; i < MAX_PENDING_ACKS; i++) {
+        if (!acks[i].active) return &acks[i];
+    }
+    ESP_LOGW(TAG, "no slot for an acknowledgement; the sender will retry");
+    return NULL;
+}
+
+// A bare acknowledgement, sent when the sender already knows how to reach us.
+static void queue_ack(const node_t* peer, const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t extended_attempt) {
+    pending_ack_t* slot = free_ack_slot();
+    if (slot == NULL) return;
+
     uint8_t payload[MC_ACK_PAYLOAD_SIZE];
     uint8_t payload_len = mc_ack_build(hash, extended_attempt, (uint8_t)esp_random(), payload, sizeof(payload));
     if (payload_len == 0) return;
 
-    for (int i = 0; i < MAX_PENDING_ACKS; i++) {
-        if (acks[i].active) continue;
-        // Flooded rather than routed back along the path: we do not track return
-        // paths yet, and an unacknowledged message reads as a delivery failure.
-        acks[i].length = mc_packet_build(MC_PAYLOAD_ACK, MC_ROUTE_FLOOD, payload, payload_len, acks[i].frame,
-                                         sizeof(acks[i].frame));
-        acks[i].active = acks[i].length > 0;
-        return;
-    }
-    ESP_LOGW(TAG, "no slot for an acknowledgement; the sender will retry");
+    // Answer the way the message came: along their route if we have one, else
+    // flooded. An acknowledgement that floods the whole mesh to travel two hops
+    // is most of the airtime a short conversation costs.
+    bool direct = peer != NULL && peer->has_out_path;
+    slot->length =
+        mc_packet_build(MC_PAYLOAD_ACK, direct ? MC_ROUTE_DIRECT : MC_ROUTE_FLOOD,
+                        direct ? peer->out_path_ctrl : 0, direct ? peer->out_path : NULL, payload, payload_len,
+                        slot->frame, sizeof(slot->frame));
+    slot->active = slot->length > 0;
+}
+
+// The reply to a message that reached us by flood: the route it took, so the
+// sender can stop flooding, with the acknowledgement carried inside it.
+//
+// This is the whole of MeshCore's path discovery. Nothing is learned passively
+// -- a node that never returns a path is one every peer must flood to reach,
+// forever, which on a duty-cycle limited band is a cost the whole mesh pays.
+static void queue_path_return(const node_t* peer, const mc_packet_t* packet, const identity_t* identity,
+                              const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t extended_attempt) {
+    pending_ack_t* slot = free_ack_slot();
+    if (slot == NULL) return;
+
+    uint8_t ack[MC_ACK_PAYLOAD_SIZE];
+    uint8_t ack_len = mc_ack_build(hash, extended_attempt, (uint8_t)esp_random(), ack, sizeof(ack));
+    if (ack_len == 0) return;
+
+    // The path is returned exactly as it arrived. No reversing: a MeshCore path
+    // is ordered sender to recipient and repeaters carry traffic both ways, so
+    // the route that brought this to us is the route back to us.
+    uint8_t path_ctrl = MC_PATH_CTRL(packet->hop_count, packet->bytes_per_hop);
+
+    uint8_t plain[MC_MAX_PAYLOAD_SIZE];
+    size_t  len = mc_path_frame(path_ctrl, packet->path, MC_PAYLOAD_ACK, ack, ack_len, esp_random(), plain,
+                                sizeof(plain));
+    if (len == 0) return;
+
+    size_t padded = mc_pad_plaintext(plain, len, sizeof(plain));
+    if (padded == 0) return;
+
+    uint8_t cipher[MC_MAX_PAYLOAD_SIZE];
+    uint8_t mac[32];
+    if (!mc_dm_encrypt(peer->shared_secret, plain, padded, cipher, mac)) return;
+
+    uint8_t payload[MC_MAX_PAYLOAD_SIZE];
+    uint8_t payload_len = mc_datagram_build(peer->key[0], identity->public_key[0], mac, cipher, (uint8_t)padded,
+                                            payload, sizeof(payload));
+    if (payload_len == 0) return;
+
+    // Flooded, necessarily: they have no route to us yet, which is why we are
+    // sending this at all.
+    slot->length = mc_packet_build(MC_PAYLOAD_PATH, MC_ROUTE_FLOOD, 0, NULL, payload, payload_len, slot->frame,
+                                   sizeof(slot->frame));
+    slot->active = slot->length > 0;
 }
 
 // See mesh_net.h: built here, queued by the event loop.
@@ -257,7 +313,15 @@ static bool handle_datagram(const mc_packet_t* packet, mesh_state_t* mesh, const
             // carries the attempt number on a fourth or later try. Zero when the
             // frame is too short to hold one.
             uint8_t extended = decoded.signed_len + 1 < decoded.plain_len ? decoded.plain[decoded.signed_len + 1] : 0;
-            queue_ack(hash, extended);
+
+            // Arriving by flood means the sender does not know the way here.
+            // Answering with the route it took teaches them, and costs one
+            // packet rather than the several a repeated flood would.
+            if (packet->route == MC_ROUTE_FLOOD || packet->route == MC_ROUTE_TRANSPORT_FLOOD) {
+                queue_path_return(node, packet, identity, hash, extended);
+            } else {
+                queue_ack(node, hash, extended);
+            }
         }
 
         // Every retry is a fresh ciphertext -- the attempt counter lives inside
@@ -293,12 +357,8 @@ static bool handle_datagram(const mc_packet_t* packet, mesh_state_t* mesh, const
     return false;
 }
 
-// An acknowledgement for one of our direct messages. Matched on the hash the
-// sender computed when it built the message.
-static bool handle_ack(const mc_packet_t* packet, mesh_state_t* mesh) {
-    uint8_t hash[MC_ACK_HASH_SIZE];
-    if (!mc_ack_parse(packet->payload, packet->payload_length, hash)) return false;
-
+// Mark the outgoing direct message a four-byte acknowledgement hash belongs to.
+static bool credit_ack(mesh_state_t* mesh, const uint8_t hash[MC_ACK_HASH_SIZE]) {
     uint32_t value = (uint32_t)hash[0] | ((uint32_t)hash[1] << 8) | ((uint32_t)hash[2] << 16) |
                      ((uint32_t)hash[3] << 24);
 
@@ -313,6 +373,60 @@ static bool handle_ack(const mc_packet_t* packet, mesh_state_t* mesh) {
         return true;
     }
     return false;
+}
+
+// A route handed back to us, with an acknowledgement usually inside it.
+//
+// This is what a real MeshCore client sends in reply to a flooded message --
+// not a bare acknowledgement -- so without this our own direct messages would
+// never be confirmed, however correct the acknowledgement handling is.
+static bool handle_path_return(const mc_packet_t* packet, mesh_state_t* mesh, const identity_t* identity) {
+    if (!identity->has_keypair) return false;
+
+    mc_datagram_t datagram;
+    if (!mc_datagram_parse(packet->payload, packet->payload_length, &datagram)) return false;
+    if (datagram.dest_hash != identity->public_key[0]) return false;
+
+    for (int i = 0; i < MAX_NODES; i++) {
+        node_t* node = &mesh->nodes[i];
+        if (!node->used || !node->has_secret || node->key[0] != datagram.src_hash) continue;
+
+        uint8_t plain[MC_MAX_PAYLOAD_SIZE];
+        size_t  plain_len = 0;
+        if (!mc_datagram_decrypt(node->shared_secret, datagram.mac, datagram.cipher, datagram.cipher_length, plain,
+                                 sizeof(plain), &plain_len)) {
+            continue;
+        }
+
+        mc_path_msg_t returned;
+        if (!mc_path_parse(plain, plain_len, &returned)) return false;
+
+        // Replace whatever we had. A node handing back a route is describing the
+        // one that just worked, and an older path is not evidence of anything.
+        if (returned.path_bytes <= sizeof(node->out_path)) {
+            memcpy(node->out_path, returned.path, returned.path_bytes);
+            node->out_path_ctrl = returned.path_ctrl;
+            node->has_out_path  = true;
+            node->last_heard    = (uint32_t)time(NULL);
+            ESP_LOGI(TAG, "learned a %u hop route to %s", (unsigned)MC_PATH_COUNT(returned.path_ctrl),
+                     node->long_name[0] ? node->long_name : "a node");
+        }
+
+        // The acknowledgement rides inside the same packet.
+        if (returned.extra_type == MC_PAYLOAD_ACK && returned.extra_len >= MC_ACK_HASH_SIZE) {
+            credit_ack(mesh, returned.extra);
+        }
+        return true;
+    }
+    return false;
+}
+
+// An acknowledgement for one of our direct messages. Matched on the hash the
+// sender computed when it built the message.
+static bool handle_ack(const mc_packet_t* packet, mesh_state_t* mesh) {
+    uint8_t hash[MC_ACK_HASH_SIZE];
+    if (!mc_ack_parse(packet->payload, packet->payload_length, hash)) return false;
+    return credit_ack(mesh, hash);
 }
 
 static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh, const identity_t* identity) {
@@ -393,6 +507,12 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
 
     if (packet.type == MC_PAYLOAD_ACK) {
         bool matched = handle_ack(&packet, mesh);
+        detail(mesh);
+        return matched;
+    }
+
+    if (packet.type == MC_PAYLOAD_PATH) {
+        bool matched = handle_path_return(&packet, mesh, identity);
         detail(mesh);
         return matched;
     }
@@ -486,23 +606,30 @@ static uint8_t meshcore_encode(mesh_state_t* mesh, uint8_t channel, const identi
     uint8_t payload_len = mc_grp_txt_build(ch->hash, mac, cipher, (uint8_t)padded, payload, sizeof(payload));
     if (payload_len == 0) return 0;
 
-    uint8_t len = mc_packet_build(MC_PAYLOAD_GRP_TXT, MC_ROUTE_FLOOD, payload, payload_len, out, out_max);
+    uint8_t len = mc_packet_build(MC_PAYLOAD_GRP_TXT, MC_ROUTE_FLOOD, 0, NULL, payload, payload_len, out, out_max);
     if (len == 0) return 0;
 
     track_transmission(payload, payload_len, msg_seq);
     return len;
 }
 
-static uint8_t meshcore_encode_dm(mesh_state_t* mesh, const identity_t* identity, const node_t* peer,
-                                  const char* text, message_t* msg, uint8_t* out, size_t out_max) {
-    (void)mesh;
+// Build one attempt at a direct message.
+//
+// `attempt` goes into the plaintext, so every retry is a different ciphertext
+// and a different expected acknowledgement. That is deliberate on MeshCore's
+// part: an identical retry would be suppressed as a duplicate by the first
+// repeater that saw the original, and never reach anyone.
+//
+// `use_path` sends along the route we have learned instead of flooding the mesh.
+// Directed traffic costs a fraction of the airtime, but it is a claim that the
+// route still works -- so the caller counts failures and stops making it.
+uint8_t mc_encode_dm_attempt(const identity_t* identity, const node_t* peer, const char* text, uint8_t attempt,
+                             bool use_path, message_t* msg, uint8_t* out, size_t out_max) {
     if (!identity->has_keypair || peer == NULL || !peer->has_secret) return 0;
 
     uint8_t plain[MC_MAX_PAYLOAD_SIZE];
     uint8_t unpadded = 0;
-    // Attempt zero: resends are not implemented, and the counter exists only to
-    // make a retry hash differently from the original.
-    size_t padded = mc_dm_frame_plaintext((uint32_t)time(NULL), 0, text, plain, sizeof(plain), &unpadded);
+    size_t  padded = mc_dm_frame_plaintext((uint32_t)time(NULL), attempt, text, plain, sizeof(plain), &unpadded);
     if (padded == 0) return 0;
 
     // What the recipient will send back if it reads this. Computed over our own
@@ -519,15 +646,41 @@ static uint8_t meshcore_encode_dm(mesh_state_t* mesh, const identity_t* identity
                                             payload, sizeof(payload));
     if (payload_len == 0) return 0;
 
-    uint8_t len = mc_packet_build(MC_PAYLOAD_TXT_MSG, MC_ROUTE_FLOOD, payload, payload_len, out, out_max);
+    bool    direct = use_path && peer->has_out_path;
+    uint8_t len    = mc_packet_build(MC_PAYLOAD_TXT_MSG, direct ? MC_ROUTE_DIRECT : MC_ROUTE_FLOOD,
+                                     direct ? peer->out_path_ctrl : 0, direct ? peer->out_path : NULL, payload,
+                                     payload_len, out, out_max);
     if (len == 0) return 0;
 
     if (msg) {
         msg->expected_ack = (uint32_t)hash[0] | ((uint32_t)hash[1] << 8) | ((uint32_t)hash[2] << 16) |
                             ((uint32_t)hash[3] << 24);
+        msg->dm_attempt = attempt;
+        msg->dm_direct  = direct;
+        memcpy(msg->dm_peer_key, peer->key, NODE_KEY_LEN);
         track_transmission(payload, payload_len, msg->seq);
     }
     return len;
+}
+
+// How long to wait for an acknowledgement before trying again, following
+// upstream's own formula so the timing matches what the other end expects.
+uint32_t mc_ack_timeout_ms(const node_t* peer, bool direct) {
+    // A short direct message at SF8 / BW62.5 / CR4/8 is roughly this long on
+    // air. Close enough: the result is a patience budget, not a measurement.
+    const uint32_t airtime = 750;
+
+    if (!direct) return MC_SEND_TIMEOUT_BASE_MS + MC_FLOOD_TIMEOUT_FACTOR * airtime;
+
+    uint8_t hops = peer && peer->has_out_path ? MC_PATH_COUNT(peer->out_path_ctrl) : 0;
+    return MC_SEND_TIMEOUT_BASE_MS + (airtime * MC_DIRECT_PERHOP_FACTOR + MC_DIRECT_PERHOP_EXTRA_MS) * (hops + 1);
+}
+
+static uint8_t meshcore_encode_dm(mesh_state_t* mesh, const identity_t* identity, const node_t* peer,
+                                  const char* text, message_t* msg, uint8_t* out, size_t out_max) {
+    (void)mesh;
+    // First attempt: use the route if we have one. Failures walk it back.
+    return mc_encode_dm_attempt(identity, peer, text, 0, true, msg, out, out_max);
 }
 
 // An advert is the whole of MeshCore's identity system: it binds a name and a
@@ -567,7 +720,7 @@ static uint8_t meshcore_encode_advert(mesh_state_t* mesh, uint8_t channel, const
     }
     memcpy(&payload[MC_ADVERT_SIGNATURE_OFFSET], signature, sizeof(signature));
 
-    uint8_t len = mc_packet_build(MC_PAYLOAD_ADVERT, MC_ROUTE_FLOOD, payload, payload_len, out, out_max);
+    uint8_t len = mc_packet_build(MC_PAYLOAD_ADVERT, MC_ROUTE_FLOOD, 0, NULL, payload, payload_len, out, out_max);
     if (len == 0) return 0;
 
     // Repeaters will flood this back at us. Remember it so our own advert is not

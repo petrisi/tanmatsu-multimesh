@@ -1257,7 +1257,7 @@ static void draw_node_detail(const app_model_t* model) {
     const node_t* node = &mesh->nodes[order[model->node_index]];
 
     float bw = 52 * CHAR_W;
-    float bh = LINE_H * 11 + 16;
+    float bh = LINE_H * 12 + 16;
     float bx, by;
     overlay_box(bw, bh, &bx, &by, mesh->accent, "Node");
 
@@ -1326,6 +1326,30 @@ static void draw_node_detail(const app_model_t* model) {
     pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Signal");
     pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, radio);
     y += LINE_H;
+
+    // Whether we know a way to reach this node without flooding the mesh. Shown
+    // because it is the difference between a message costing one packet and
+    // costing every repeater in range a retransmission.
+    if (model->active == MESH_MC) {
+        char route[52];
+        if (!node->has_out_path) {
+            snprintf(route, sizeof(route), "flood");
+        } else {
+            uint8_t width = MC_PATH_HASH_SIZE(node->out_path_ctrl);
+            uint8_t hops  = MC_PATH_COUNT(node->out_path_ctrl);
+            int     n     = snprintf(route, sizeof(route), "%u hop%s  ", (unsigned)hops, hops == 1 ? "" : "s");
+            for (int i = 0; i + width <= MC_PATH_BYTES(node->out_path_ctrl) && n < (int)sizeof(route) - 8;
+                 i += width) {
+                if (i) n += snprintf(route + n, sizeof(route) - n, ">");
+                for (int b = 0; b < width; b++) {
+                    n += snprintf(route + n, sizeof(route) - n, "%02x", node->out_path[i + b]);
+                }
+            }
+        }
+        pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Route");
+        pax_draw_text(&fb, node->has_out_path ? COL_OK : COL_DIM, FONT, FONT_SIZE, vx, y, route);
+        y += LINE_H;
+    }
 
     // What the advert signature proved, if anything. Only MeshCore can answer:
     // a Meshtastic NodeInfo is unsigned, so there is nothing to report and

@@ -104,6 +104,20 @@ size_t mc_dm_frame_plaintext(uint32_t timestamp, uint8_t attempt, const char* te
 bool mc_dm_encrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t* plain, size_t padded_len,
                    uint8_t* out_cipher, uint8_t out_mac[32]);
 
+// Pad a plaintext out to a whole cipher block. ECB has no notion of a partial
+// block, and the padding is zeros, which every payload here treats as absent.
+size_t mc_pad_plaintext(uint8_t* buf, size_t len, size_t buf_size);
+
+// Check the MAC and decrypt, without interpreting the result. Every datagram
+// shares this envelope -- direct messages, returned paths, requests -- and only
+// the plaintext layout differs, so the layout is left to the caller.
+//
+// False without writing anything when the MAC does not match, which is how the
+// right contact is picked out of the several a one-byte sender hash allows.
+bool mc_datagram_decrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t mac[MC_CIPHER_MAC_SIZE],
+                         const uint8_t* cipher, size_t cipher_len, uint8_t* out_plain, size_t out_max,
+                         size_t* out_len);
+
 // Verify the MAC, decrypt, and split. False without writing anything when the
 // MAC does not match -- which is also how the right contact is picked out, since
 // the one-byte sender hash on the wire is not unique.

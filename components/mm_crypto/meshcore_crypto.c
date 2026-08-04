@@ -240,20 +240,41 @@ bool mc_dm_encrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t* pl
     return hmac_sha256(secret, MC_SHARED_SECRET_LEN, out_cipher, padded_len, out_mac);
 }
 
-bool mc_dm_decrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t mac[MC_CIPHER_MAC_SIZE],
-                   const uint8_t* cipher, size_t cipher_len, mc_dm_msg_t* out) {
-    if (secret == NULL || mac == NULL || cipher == NULL || out == NULL) return false;
-    memset(out, 0, sizeof(*out));
+size_t mc_pad_plaintext(uint8_t* buf, size_t len, size_t buf_size) {
+    if (buf == NULL) return 0;
+    size_t padded = ((len + MC_CIPHER_BLOCK - 1) / MC_CIPHER_BLOCK) * MC_CIPHER_BLOCK;
+    if (padded > buf_size || padded > MC_MAX_PAYLOAD_SIZE) return 0;
+    memset(&buf[len], 0, padded - len);
+    return padded;
+}
+
+bool mc_datagram_decrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t mac[MC_CIPHER_MAC_SIZE],
+                         const uint8_t* cipher, size_t cipher_len, uint8_t* out_plain, size_t out_max,
+                         size_t* out_len) {
+    if (secret == NULL || mac == NULL || cipher == NULL || out_plain == NULL || out_len == NULL) return false;
     if (cipher_len == 0 || (cipher_len % MC_CIPHER_BLOCK) != 0) return false;
-    if (cipher_len > MC_MAX_PAYLOAD_SIZE) return false;
+    if (cipher_len > MC_MAX_PAYLOAD_SIZE || cipher_len > out_max) return false;
 
     uint8_t computed[32];
     if (!hmac_sha256(secret, MC_SHARED_SECRET_LEN, cipher, cipher_len, computed)) return false;
     if (memcmp(computed, mac, MC_CIPHER_MAC_SIZE) != 0) return false;
 
-    if (!aes_ecb_decrypt(secret, DM_CIPHER_KEY_LEN, cipher, cipher_len, out->plain, sizeof(out->plain))) return false;
-    if (cipher_len < 6) return false;  // timestamp, flags and at least one text byte
-    out->plain_len = (uint8_t)cipher_len;
+    if (!aes_ecb_decrypt(secret, DM_CIPHER_KEY_LEN, cipher, cipher_len, out_plain, out_max)) return false;
+    *out_len = cipher_len;
+    return true;
+}
+
+bool mc_dm_decrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t mac[MC_CIPHER_MAC_SIZE],
+                   const uint8_t* cipher, size_t cipher_len, mc_dm_msg_t* out) {
+    if (out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+
+    size_t plain_len = 0;
+    if (!mc_datagram_decrypt(secret, mac, cipher, cipher_len, out->plain, sizeof(out->plain), &plain_len)) {
+        return false;
+    }
+    if (plain_len < 6) return false;  // timestamp, flags and at least one text byte
+    out->plain_len = (uint8_t)plain_len;
 
     memcpy(&out->timestamp, out->plain, 4);
     out->text_type = (uint8_t)(out->plain[4] >> 2);
@@ -261,7 +282,7 @@ bool mc_dm_decrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t mac
 
     // The text is NUL-terminated inside the padding. Bound the copy by the block
     // length so a frame whose padding was tampered with cannot run off the end.
-    size_t max_text = cipher_len - 5;
+    size_t max_text = plain_len - 5;
     if (max_text >= sizeof(out->text)) max_text = sizeof(out->text) - 1;
     memcpy(out->text, &out->plain[5], max_text);
     out->text[max_text] = '\0';

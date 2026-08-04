@@ -25,6 +25,7 @@
 #include "freertos/task.h"
 #include "leds.h"
 #include "mesh_net.h"
+#include "meshcore_net.h"
 #include "meshtastic_crypto.h"
 #include "meshtastic_wire.h"
 #include "nodestore.h"
@@ -209,6 +210,44 @@ static bool drain_tx_events(void) {
 // moment looks like a failure.
 #define TX_REPEAT_WINDOW_MS 60000
 
+// A MeshCore direct message that has gone unacknowledged: try again, and after
+// enough failures stop believing in the route.
+//
+// Returns true when another attempt was queued. The message stays TX_AWAITING
+// throughout, so the screen shows one message in flight rather than flickering
+// between states on every retry.
+static bool retry_direct_message(mesh_state_t* mesh, message_t* msg) {
+    node_t* peer = model_node_find_mc(mesh, msg->dm_peer_key);
+    if (peer == NULL) return false;  // the contact was pruned; nothing to retry to
+
+    bool exhausted = msg->dm_attempt >= MC_DIRECT_RETRIES;
+    if (msg->dm_direct && exhausted) {
+        // Three attempts along a route that answered none of them. The route is
+        // the thing most likely to be wrong, so drop it and let the next send
+        // flood -- which is also how a fresh one gets learned, since a flooded
+        // message comes back with a path return.
+        //
+        // Written to disk, because a route that has stopped working is exactly
+        // the kind of thing that must not come back on the next boot.
+        peer->has_out_path  = false;
+        peer->out_path_ctrl = 0;
+        nodestore_mark_dirty(MESH_MC);
+        ESP_LOGW(TAG, "route to %s stopped working; flooding again", msg->peer);
+        toast("route to %s lost - flooding", msg->peer);
+    } else if (exhausted) {
+        return false;  // already flooding and still nothing; give up
+    }
+
+    tx_request_t request = {.mesh = MESH_MC, .seq = msg->seq};
+    request.length       = mc_encode_dm_attempt(&model.identity, peer, msg->text, (uint8_t)(msg->dm_attempt + 1),
+                                                peer->has_out_path, msg, request.frame, sizeof(request.frame));
+    if (request.length == 0) return false;
+    if (xQueueSend(tx_requests, &request, 0) != pdTRUE) return false;
+
+    msg->tx_tick_ms = now_ms();
+    return true;
+}
+
 static bool tx_settle(void) {
     bool changed = false;
 
@@ -217,6 +256,25 @@ static bool tx_settle(void) {
         for (int i = 0; i < MAX_MESSAGES; i++) {
             message_t* msg = &mesh->messages[i];
             if (!msg->used || msg->tx != TX_AWAITING) continue;
+
+            // A MeshCore direct message is answered explicitly, so it has its
+            // own deadline -- far shorter than the window a broadcast needs,
+            // because there is something definite to wait for.
+            if (m == MESH_MC && msg->dm && msg->outgoing && !msg->acked) {
+                // The peer, so the deadline can account for how far the reply
+                // has to travel. Waiting a single hop's worth on a three-hop
+                // route would condemn a route that was merely slow.
+                const node_t* peer = model_node_find_mc(mesh, msg->dm_peer_key);
+                if (now_ms() - msg->tx_tick_ms < mc_ack_timeout_ms(peer, msg->dm_direct)) continue;
+                if (retry_direct_message(mesh, msg)) {
+                    changed = true;
+                    continue;
+                }
+                msg->tx = TX_FAILED;
+                changed = true;
+                continue;
+            }
+
             if (now_ms() - msg->tx_tick_ms < TX_REPEAT_WINDOW_MS) continue;
 
             // Heard repeated at least once means it reached the mesh. Silence
