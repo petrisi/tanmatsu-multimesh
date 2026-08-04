@@ -244,8 +244,15 @@ other printable character arrives. Spaces closer together than 120 ms are also
 treated as one press, since the OR can still edge more than once as the bar
 rocks.
 
+MeshCore learns routes. A message to a contact floods the mesh until that
+contact hands back the path it took, after which it goes directly along that
+path for a fraction of the airtime. Routes are shown in the node detail and can
+be forgotten there (☁) when one stops working — with no route the next message
+floods, and a flooded message draws a fresh path return by itself.
+
 An outgoing message occupies the timestamp column with its progress until it
-settles. Neither network acknowledges a broadcast, so the delivery signal is
+settles. A broadcast shows repeats as `x2`; a direct message adds the attempt,
+`x1a2` being one repeat heard on the second try. Neither network acknowledges a broadcast, so the delivery signal is
 hearing a repeater flood it back: MeshCore shows how many repeats were counted,
 Meshtastic the hop budget and last relay. The window is 60 seconds, after which a
 message that was never repeated keeps its timestamp in red.

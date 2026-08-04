@@ -521,8 +521,19 @@ static void draw_time_cell(const app_model_t* model, const message_t* msg, float
                 col = COL_WARN;
                 break;
             default:  // TX_AWAITING
-                snprintf(buf, sizeof(buf), " x%-2u ", (unsigned)msg->repeats);
-                col = msg->repeats ? COL_OK : COL_WARN;
+                // A broadcast has only repeats to report. A direct message also
+                // has attempts, and the attempt number is the part that says
+                // something is going wrong -- so it extends the same notation
+                // rather than replacing it: x means repeats on every row, a is
+                // the attempt. "x1a2" is one repeat heard, second try.
+                if (msg->dm) {
+                    snprintf(buf, sizeof(buf), " x%ua%u", (unsigned)(msg->repeats > 9 ? 9 : msg->repeats),
+                             (unsigned)(msg->dm_attempt > 8 ? 9 : msg->dm_attempt + 1));
+                    col = msg->dm_attempt > 0 ? COL_RISK : (msg->repeats ? COL_OK : COL_WARN);
+                } else {
+                    snprintf(buf, sizeof(buf), " x%-2u ", (unsigned)msg->repeats);
+                    col = msg->repeats ? COL_OK : COL_WARN;
+                }
                 break;
         }
         pax_draw_text(&fb, col, FONT, FONT_SIZE, x_time(), y, buf);
@@ -1418,7 +1429,10 @@ static void draw_node_detail(const app_model_t* model) {
     hx       = hint(hx, hy, CAP_CROSS, "back");
     hx       = hint(hx, hy, CAP_TRI, "message");
     hx       = hint(hx, hy, CAP_CIRCLE, "short");
-    hint(hx, hy, CAP_SQUARE, "remove");
+    hx       = hint(hx, hy, CAP_SQUARE, "remove");
+    // Only offered when there is one, both to keep the bar short and because
+    // the action means nothing otherwise.
+    if (model->active == MESH_MC && node->has_out_path) hint(hx, hy, CAP_CLOUD, "forget route");
 }
 
 static void draw_node_short(const app_model_t* model) {

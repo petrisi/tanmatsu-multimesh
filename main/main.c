@@ -1105,6 +1105,25 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
                 model.overlay = OVERLAY_NODE_SHORT;
             }
             break;
+        case BSP_INPUT_NAVIGATION_KEY_F5:  // forget the route to this node
+            // The official client offers exactly this and nothing automatic: a
+            // route is a claim about the world, and the person watching the mesh
+            // is often the first to know it has stopped being true. Forgetting
+            // it is enough on its own -- with no route the next message floods,
+            // and a flooded message draws a fresh path return by itself.
+            if (model.active == MESH_MC && model.node_index >= 0 && model.node_index < count) {
+                node_t* node = &mesh->nodes[order[model.node_index]];
+                if (node->has_out_path) {
+                    node->has_out_path  = false;
+                    node->out_path_ctrl = 0;
+                    nodestore_mark_dirty(MESH_MC);
+                    session_log("route.forget peer=%02x%02x reason=manual", node->key[0], node->key[1]);
+                    toast("route forgotten - will flood");
+                } else {
+                    toast("no route to forget");
+                }
+            }
+            break;
         case BSP_INPUT_NAVIGATION_KEY_F3:  // remove this node
             if (model.node_index >= 0 && model.node_index < count) {
                 model_node_remove(mesh, order[model.node_index]);
