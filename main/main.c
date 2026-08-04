@@ -1027,6 +1027,13 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
                 }
             }
             break;
+        case BSP_INPUT_NAVIGATION_KEY_F4:  // set a short name for this node
+            if (model.node_index >= 0 && model.node_index < count) {
+                snprintf(model.node_short_edit, sizeof(model.node_short_edit), "%s",
+                         mesh->nodes[order[model.node_index]].short_name);
+                model.overlay = OVERLAY_NODE_SHORT;
+            }
+            break;
         case BSP_INPUT_NAVIGATION_KEY_F3:  // remove this node
             if (model.node_index >= 0 && model.node_index < count) {
                 model_node_remove(mesh, order[model.node_index]);
@@ -1039,6 +1046,30 @@ static void handle_node_detail_key(bsp_input_navigation_key_t key) {
         case BSP_INPUT_NAVIGATION_KEY_ESC:
         case BSP_INPUT_NAVIGATION_KEY_F1:
         case BSP_INPUT_NAVIGATION_KEY_RETURN: model.overlay = OVERLAY_NODES; break;
+        default: break;
+    }
+}
+
+static void handle_node_short_key(bsp_input_navigation_key_t key) {
+    mesh_state_t* mesh = model_active(&model);
+    int           order[MAX_NODES];
+    int           count = model_nodes_by_recency(mesh, order, MAX_NODES);
+
+    switch (key) {
+        case BSP_INPUT_NAVIGATION_KEY_BACKSPACE: field_backspace(model.node_short_edit); break;
+        case BSP_INPUT_NAVIGATION_KEY_RETURN:
+            if (model.node_index >= 0 && model.node_index < count) {
+                node_t* node = &mesh->nodes[order[model.node_index]];
+                snprintf(node->short_name, sizeof(node->short_name), "%s", model.node_short_edit);
+                nodestore_mark_dirty(model.active);
+                // An empty field is a deletion, not a mistake: it puts the node
+                // back to being labelled from its name.
+                toast(node->short_name[0] ? "short name saved" : "short name cleared");
+            }
+            model.overlay = OVERLAY_NODE_DETAIL;
+            break;
+        case BSP_INPUT_NAVIGATION_KEY_ESC:
+        case BSP_INPUT_NAVIGATION_KEY_F1: model.overlay = OVERLAY_NODE_DETAIL; break;
         default: break;
     }
 }
@@ -1121,6 +1152,7 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
         case OVERLAY_PICKER: handle_picker_key(key); return;
         case OVERLAY_NODES: handle_nodes_key(key); return;
         case OVERLAY_NODE_DETAIL: handle_node_detail_key(key); return;
+        case OVERLAY_NODE_SHORT: handle_node_short_key(key); return;
         case OVERLAY_DETAIL:
             if (key == BSP_INPUT_NAVIGATION_KEY_ESC || key == BSP_INPUT_NAVIGATION_KEY_F1 ||
                 key == BSP_INPUT_NAVIGATION_KEY_RETURN) {
@@ -1437,6 +1469,9 @@ void app_main(void) {
                         switch (model.overlay) {
                             case OVERLAY_EDITOR: field_append(editor_focused_field(&max), max, text); break;
                             case OVERLAY_IDENTITY: field_append(identity_focused_field(&max), max, text); break;
+                            case OVERLAY_NODE_SHORT:
+                                field_append(model.node_short_edit, NODE_SHORT_MAX, text);
+                                break;
                             case OVERLAY_NONE:
                                 if (model_active(&model)->selected_seq < 0) composer_append(text);
                                 break;

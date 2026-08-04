@@ -171,6 +171,17 @@ void model_node_label(const node_t* node, mesh_id_t id, char* out, size_t out_si
     }
 }
 
+const char* model_short_name_for(const mesh_state_t* mesh, const char* name) {
+    if (mesh == NULL || name == NULL || name[0] == '\0') return NULL;
+
+    for (int i = 0; i < MAX_NODES; i++) {
+        const node_t* node = &mesh->nodes[i];
+        if (!node->used || node->short_name[0] == '\0') continue;
+        if (strcmp(node->long_name, name) == 0) return node->short_name;
+    }
+    return NULL;
+}
+
 int model_nodes_prune(mesh_state_t* mesh, uint32_t now) {
     int removed = 0;
     for (int i = 0; i < MAX_NODES; i++) {

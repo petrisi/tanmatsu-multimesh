@@ -166,9 +166,18 @@ typedef struct {
     bool     named;       // a NodeInfo or a named advert has been seen
     uint8_t  verified;    // node_verify_t
 
-    uint32_t node_num;                      // Meshtastic
-    char     short_name[NODE_SHORT_MAX + 1];  // Meshtastic
-    uint8_t  hw_model;                      // Meshtastic
+    uint32_t node_num;  // Meshtastic
+
+    // The short label the message list shows. Meshtastic nodes publish one in
+    // their NodeInfo; MeshCore has no such field on the wire, so there it is
+    // whatever the user typed. Either way an empty one falls back to the first
+    // characters of the long name, so this only needs setting when that reads
+    // badly -- which for a Finnish place name it usually does.
+    //
+    // Field order here is the on-disk order of the node table. Do not reorder
+    // without bumping NODEFILE_VERSION.
+    char    short_name[NODE_SHORT_MAX + 1];
+    uint8_t hw_model;  // Meshtastic
 
     uint8_t key[NODE_KEY_LEN];  // MeshCore: the identity. Meshtastic: unused.
     uint8_t role;               // MeshCore
@@ -233,6 +242,7 @@ typedef enum {
     OVERLAY_CONFIRM,
     OVERLAY_NODES,
     OVERLAY_NODE_DETAIL,
+    OVERLAY_NODE_SHORT,  // typing a short name for one node
 } overlay_t;
 
 // What a pending confirmation will do if accepted.
@@ -328,6 +338,7 @@ typedef struct {
     // Nodes view. -1 on the "this radio" row that is pinned above the list.
     int      node_index;
     uint32_t last_advert_ms;  // manual announce cooldown
+    char     node_short_edit[NODE_SHORT_MAX + 1];  // the short name being typed
 
     radio_state_t radio;
     int           battery_pct;
@@ -384,6 +395,14 @@ void model_target_set_channel(mesh_state_t* mesh, int channel);
 // How the target should be labelled in the status bar and the message column.
 // Falls back through name, short name and key or number, like the nodes list.
 void model_node_label(const node_t* node, mesh_id_t id, char* out, size_t out_size);
+
+// The short name set for whoever sent under `name`, or NULL if there is none.
+//
+// MeshCore channel messages carry no identity at all -- the sender's name is a
+// string inside the text -- so the only way back to a node record is to match on
+// that name. Two nodes calling themselves the same thing are indistinguishable
+// here, which is a property of the network rather than of this lookup.
+const char* model_short_name_for(const mesh_state_t* mesh, const char* name);
 
 // Drop entries we have not heard from in a long time. Nodes that never told us
 // their name expire far sooner: an unnamed entry is little more than evidence

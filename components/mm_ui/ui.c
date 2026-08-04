@@ -277,6 +277,15 @@ static void utf8_clip(char* dst, size_t dst_size, const char* src, int cells) {
     dst[at] = '\0';
 }
 
+// What to put in a narrow column for a sender: the short name if one has been
+// set for them, otherwise their real name for the clipper to shorten. Resolved
+// at draw time rather than stored on the message, so setting a short name
+// relabels the conversation already on screen instead of only what arrives next.
+static const char* short_label(const mesh_state_t* mesh, const char* name) {
+    const char* shortened = model_short_name_for(mesh, name);
+    return shortened ? shortened : name;
+}
+
 #define msg_at(mesh, logical) model_message_at((mesh), (logical))
 
 static void wrap_message(int msg_index, const char* text, int room) {
@@ -592,7 +601,7 @@ static void draw_messages(const app_model_t* model) {
             char chan[SENDER_MAX + 2];
             if (msg->dm) {
                 chan[0] = msg->outgoing ? '>' : '<';
-                utf8_clip(chan + 1, sizeof(chan) - 1, msg->peer, chan_cells(model) - 1);
+                utf8_clip(chan + 1, sizeof(chan) - 1, short_label(mesh, msg->peer), chan_cells(model) - 1);
                 pax_draw_text(&fb, COL_DM, FONT, FONT_SIZE, x_chan(), y, chan);
             } else {
                 utf8_clip(chan, sizeof(chan), ch->display, chan_cells(model));
@@ -601,7 +610,7 @@ static void draw_messages(const app_model_t* model) {
 
             if (!msg->dm) {
                 char who[SENDER_MAX];
-                utf8_clip(who, sizeof(who), msg->sender, COL_FROM_CELLS);
+                utf8_clip(who, sizeof(who), short_label(mesh, msg->sender), COL_FROM_CELLS);
                 // Colour alone distinguishes a NodeInfo short name from a raw
                 // node id -- no prefix, so the column is the same width either
                 // way.
@@ -1267,17 +1276,26 @@ static void draw_node_detail(const app_model_t* model) {
         pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Node id");
         pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, id);
         y += LINE_H;
-
-        if (node->short_name[0]) {
-            pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Short");
-            pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, node->short_name);
-            y += LINE_H;
-        }
     } else {
         pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Role");
         pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, mc_role_name((mc_role_t)node->role));
         y += LINE_H;
     }
+
+    // What the message column will show for this node, and where it came from.
+    // A Meshtastic node publishes its own; a MeshCore one has to be given one.
+    char shown[NODE_SHORT_MAX + 1];
+    if (node->short_name[0]) {
+        snprintf(shown, sizeof(shown), "%s", node->short_name);
+    } else {
+        utf8_clip(shown, sizeof(shown), label, COL_FROM_CELLS);
+    }
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Short");
+    pax_draw_text(&fb, node->short_name[0] ? COL_TEXT : COL_DIM, FONT, FONT_SIZE, vx, y, shown);
+    if (!node->short_name[0]) {
+        pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, vx + 6 * CHAR_W, y, "(from name)");
+    }
+    y += LINE_H;
 
     // The key is the identity on MeshCore and the DM key on Meshtastic; either
     // way a prefix is enough to recognise it and the full thing will not fit.
@@ -1335,7 +1353,52 @@ static void draw_node_detail(const app_model_t* model) {
     float hy = by + bh - LINE_H - 8;
     hx       = hint(hx, hy, CAP_CROSS, "back");
     hx       = hint(hx, hy, CAP_TRI, "message");
-    hint(hx, hy, CAP_SQUARE, "remove node");
+    hx       = hint(hx, hy, CAP_CIRCLE, "short");
+    hint(hx, hy, CAP_SQUARE, "remove");
+}
+
+static void draw_node_short(const app_model_t* model) {
+    const mesh_state_t* mesh = &model->mesh[model->active];
+
+    int order[MAX_NODES];
+    int count = model_nodes_by_recency(mesh, order, MAX_NODES);
+    if (model->node_index < 0 || model->node_index >= count) return;
+    const node_t* node = &mesh->nodes[order[model->node_index]];
+
+    float bw = 46 * CHAR_W;
+    float bh = LINE_H * 7 + 16;
+    float bx, by;
+    overlay_box(bw, bh, &bx, &by, mesh->accent, "Short name");
+
+    float y = by + 8 + LINE_H * 1.5f;
+
+    char full[NODE_NAME_MAX + 1];
+    model_node_label(node, model->active, full, sizeof(full));
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Node");
+    pax_draw_text(&fb, COL_FROM, FONT, FONT_SIZE, bx + 14 + 8 * CHAR_W, y, full);
+    y += LINE_H * 1.5f;
+
+    float vx = bx + 14 + 8 * CHAR_W;
+    pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Short");
+    pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, model->node_short_edit);
+    pax_draw_rect(&fb, COL_TEXT, vx + (float)strlen(model->node_short_edit) * CHAR_W, y + 3, 2, LINE_H - 6);
+    y += LINE_H;
+
+    // Say what leaving it empty does, so clearing the field is an obvious way
+    // back to the default rather than something to be avoided.
+    char note[52];
+    // Four cells, but up to four bytes each: the fallback is exactly what the
+    // message column would show, Finnish letters and all.
+    char preview[COL_FROM_CELLS * 4 + 1];
+    utf8_clip(preview, sizeof(preview), full, COL_FROM_CELLS);
+    snprintf(note, sizeof(note), "empty uses \"%s\"", preview);
+    pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, bx + 14, y, note);
+
+    y       += LINE_H + 4;
+    float hx = bx + 12;
+    hx       = hint(hx, y, CAP_CROSS, "cancel");
+    hint_text(hx, y, "enter save");
 }
 
 static void draw_toast(const app_model_t* model) {
@@ -1367,6 +1430,7 @@ void ui_render(const app_model_t* model) {
         case OVERLAY_CONFIRM: draw_confirm(model); break;
         case OVERLAY_NODES: draw_nodes(model); break;
         case OVERLAY_NODE_DETAIL: draw_node_detail(model); break;
+        case OVERLAY_NODE_SHORT: draw_node_short(model); break;
         default: break;
     }
     blit();
