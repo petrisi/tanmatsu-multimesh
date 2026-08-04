@@ -182,6 +182,24 @@ const char* model_short_name_for(const mesh_state_t* mesh, const char* name) {
     return NULL;
 }
 
+int model_drop_narrow_routes(mesh_state_t* mesh, uint8_t min_hash_size) {
+    int dropped = 0;
+    for (int i = 0; i < MAX_NODES; i++) {
+        node_t* node = &mesh->nodes[i];
+        if (!node->used || !node->has_out_path) continue;
+
+        // Width lives in the top two bits of the control byte, as one less than
+        // the number of bytes per hop.
+        uint8_t width = (uint8_t)((node->out_path_ctrl >> 6) + 1);
+        if (width >= min_hash_size) continue;
+
+        node->has_out_path  = false;
+        node->out_path_ctrl = 0;
+        dropped++;
+    }
+    return dropped;
+}
+
 int model_nodes_prune(mesh_state_t* mesh, uint32_t now) {
     int removed = 0;
     for (int i = 0; i < MAX_NODES; i++) {

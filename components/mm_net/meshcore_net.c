@@ -145,6 +145,9 @@ static void queue_ack(const node_t* peer, const uint8_t hash[MC_ACK_HASH_SIZE], 
         mc_packet_build(MC_PAYLOAD_ACK, direct ? MC_ROUTE_DIRECT : MC_ROUTE_FLOOD,
                         direct ? peer->out_path_ctrl : MC_PATH_CTRL_NEW, direct ? peer->out_path : NULL, payload, payload_len,
                         slot->frame, sizeof(slot->frame));
+    // Remember it, or a repeater echoing it back costs us a parse and shows
+    // up in the log as somebody else's traffic.
+    dedup_remember(&seen, payload, payload_len);
     slot->active = slot->length > 0;
 }
 
@@ -189,6 +192,7 @@ static void queue_path_return(const node_t* peer, const mc_packet_t* packet, con
     // sending this at all.
     slot->length = mc_packet_build(MC_PAYLOAD_PATH, MC_ROUTE_FLOOD, MC_PATH_CTRL_NEW, NULL, payload, payload_len, slot->frame,
                                    sizeof(slot->frame));
+    dedup_remember(&seen, payload, payload_len);
     slot->active = slot->length > 0;
 }
 

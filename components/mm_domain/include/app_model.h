@@ -389,13 +389,38 @@ typedef struct {
     uint32_t toast_until_ms;
 } app_model_t;
 
-// Longest message each network can carry, in bytes of text. Approximate: the
-// real figures depend on the sender name and header overhead.
+// Longest message each network can carry, in bytes of text.
+//
+// MeshCore's own limit is ten cipher blocks. Meshtastic's is the packet payload
+// less protobuf overhead.
 #define LIMIT_MC_BYTES 160
 #define LIMIT_MT_BYTES 220
 
+// Where a MeshCore message stops being reliably deliverable, which is well short
+// of where it stops being legal. Airtime grows with length and every hop is
+// another chance to lose the frame, so a long message across several hops fails
+// far more often than a short one -- observed, not theorised. These colour the
+// byte counter; they do not restrict anything.
+#define MC_COMFORT_BYTES 48
+#define MC_STRAIN_BYTES  96
+
 static inline int model_byte_limit(const app_model_t* model) {
-    return model->active == MESH_MT ? LIMIT_MT_BYTES : LIMIT_MC_BYTES;
+    if (model->active == MESH_MT) return LIMIT_MT_BYTES;
+
+    // A MeshCore channel message carries the sender's name in the same payload,
+    // as "Name: text", because the protocol has nowhere else to put it. That
+    // prefix comes out of the same budget: without subtracting it, a full-length
+    // message from anyone with a long name overflows the cipher buffer and is
+    // refused at the point of sending with nothing to explain why.
+    const mesh_state_t* mesh = &model->mesh[MESH_MC];
+    if (mesh->target_contact) return LIMIT_MC_BYTES;  // a direct message has no prefix
+
+    int prefix = 0;
+    while (model->identity.name[prefix] != '\0') prefix++;
+    prefix += 2;  // the ": " separator
+
+    int room = LIMIT_MC_BYTES - prefix;
+    return room > 0 ? room : 0;
 }
 
 // Zero the model and set the per-network constants. Channels and identity come
@@ -453,6 +478,18 @@ int model_nodes_prune(mesh_state_t* mesh, uint32_t now);
 
 void model_nodes_clear(mesh_state_t* mesh);
 void model_node_remove(mesh_state_t* mesh, int index);
+
+// Forget routes recorded at a narrower hop width than we now send with.
+//
+// A stored route carries its own width and works whatever we originate with, so
+// a narrow one is not invalid -- only ambiguous, since a hop is that many bytes
+// of a repeater's public key and fewer bytes means more repeaters answer to it.
+// Narrower than we now use is worth discarding because flooding re-learns a
+// wider one at the cost of a single message; wider than we now use is better
+// than anything we could re-learn, and is kept.
+//
+// Returns how many were dropped.
+int model_drop_narrow_routes(mesh_state_t* mesh, uint8_t min_hash_size);
 
 // Indices into `nodes`, most recently heard first. Returns how many were
 // written. Used by the list view, which never shows the raw array order.

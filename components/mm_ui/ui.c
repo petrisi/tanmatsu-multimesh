@@ -38,6 +38,7 @@ static const char TAG[] = "ui";
 #define COL_WARN    0xFFE8D44C
 #define COL_BAD     0xFFE24B4B
 #define COL_DM      0xFFE0A0FF  // conversations, distinct from every channel colour
+#define COL_RISK    0xFFF08030  // allowed, but unlikely to survive the trip
 
 // Keycap colours, matched to the physical legends on the top row.
 #define KEY_RED    0xFFE24B4B
@@ -636,8 +637,14 @@ static void draw_messages(const app_model_t* model) {
             }
 
             if (model->show_meta) {
-                char meta[16];
-                snprintf(meta, sizeof(meta), "%4ddBm %uh", msg->rssi_dbm, (unsigned)msg->hops);
+                // Signal-to-noise, not RSSI. The coprocessor reports a per-packet
+                // RSSI of zero for every frame, so the dBm figure that used to be
+                // here was never a measurement. SNR is real and is what
+                // distinguishes a comfortable link from a marginal one anyway.
+                char meta[24];
+                snprintf(meta, sizeof(meta), "%3d.%1u dB %uh", msg->snr_db_x4 / 4,
+                         (unsigned)((msg->snr_db_x4 < 0 ? -msg->snr_db_x4 : msg->snr_db_x4) % 4) * 25 / 10,
+                         (unsigned)(msg->hops > 99 ? 99 : msg->hops));
                 pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, ui_w - 10 - COL_META_CELLS * CHAR_W, y, meta);
             }
         }
@@ -712,10 +719,27 @@ static void draw_composer(const app_model_t* model) {
 
     // Bytes, not characters: the protocol limit counts bytes and 'ä' is two of
     // them. Colour warns as the budget runs out, so no number is needed.
-    int       limit = model_byte_limit(model);
-    pax_col_t col   = model->composer_len > limit           ? COL_BAD
-                      : model->composer_len > limit * 9 / 10 ? COL_WARN
-                                                             : COL_OK;
+    //
+    // On MeshCore the warning is about delivery rather than legality. A long
+    // message is legal well past the point where it stops arriving: airtime
+    // grows with length and every hop is another chance to lose the frame, so
+    // the thresholds are set where messages were observed to start failing, not
+    // where the protocol stops accepting them. Red still means "will be
+    // refused"; amber now means "may not arrive".
+    int limit   = model_byte_limit(model);
+    int strain  = model->active == MESH_MC ? MC_STRAIN_BYTES : limit * 9 / 10;
+    int comfort = model->active == MESH_MC ? MC_COMFORT_BYTES : limit * 9 / 10;
+
+    pax_col_t col;
+    if (model->composer_len > limit) {
+        col = COL_BAD;  // will be refused outright
+    } else if (model->composer_len > strain) {
+        col = COL_RISK;  // legal, but observed to often not arrive
+    } else if (model->composer_len > comfort) {
+        col = COL_WARN;
+    } else {
+        col = COL_OK;
+    }
     char count[8];
     snprintf(count, sizeof(count), "%4d", model->composer_len);
     pax_draw_text(&fb, model->composer_len ? col : COL_SEP, FONT, FONT_SIZE, ui_w - 8 - 4 * CHAR_W,
@@ -1334,8 +1358,10 @@ static void draw_node_detail(const app_model_t* model) {
     pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, when);
     y += LINE_H;
 
+    // No RSSI: the coprocessor reports zero for it on every packet, so printing
+    // it would be inventing a measurement.
     char radio[48];
-    snprintf(radio, sizeof(radio), "%d dBm  %d.%02d dB  %u hop(s)", node->rssi_dbm, node->snr_db_x4 / 4,
+    snprintf(radio, sizeof(radio), "%d.%02d dB SNR  %u hop(s)", node->snr_db_x4 / 4,
              (node->snr_db_x4 < 0 ? -node->snr_db_x4 : node->snr_db_x4) % 4 * 25, (unsigned)node->hops);
     pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, bx + 14, y, "Signal");
     pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, vx, y, radio);

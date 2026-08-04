@@ -26,6 +26,7 @@
 #include "leds.h"
 #include "mesh_net.h"
 #include "meshcore_net.h"
+#include "meshcore_wire.h"
 #include "meshtastic_crypto.h"
 #include "meshtastic_wire.h"
 #include "nodestore.h"
@@ -1478,6 +1479,16 @@ void app_main(void) {
 
     if (nodestore_init()) {
         nodestore_load(&model);
+
+        // Routes recorded before we widened our hops are ambiguous: one byte of
+        // a repeater's key names several repeaters. Dropping them costs one
+        // flooded message each to re-learn at the width we now use, and that
+        // flood happens by itself the next time anyone is messaged.
+        int narrow = model_drop_narrow_routes(&model.mesh[MESH_MC], MC_PATH_HASH_SIZE_OURS);
+        if (narrow > 0) {
+            ESP_LOGI(TAG, "dropped %d route(s) narrower than %d bytes per hop", narrow, MC_PATH_HASH_SIZE_OURS);
+            nodestore_mark_dirty(MESH_MC);
+        }
     } else {
         ESP_LOGW(TAG, "nodes will not persist this session");
     }
