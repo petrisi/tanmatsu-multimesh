@@ -27,6 +27,7 @@
 #include "mesh_net.h"
 #include "meshcore_net.h"
 #include "meshtastic_crypto.h"
+#include "meshtastic_wire.h"
 #include "nodestore.h"
 #include "nvs_flash.h"
 #include "radio.h"
@@ -1253,6 +1254,14 @@ void app_main(void) {
     } else {
         ESP_LOGE(TAG, "KEY AGREEMENT SELF-TEST FAILED - direct messages disabled");
         ui_boot_line("key agreement self-test FAILED");
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+
+    // A malformed NodeInfo transmits perfectly well and simply never appears on
+    // the other node, so this is checked here rather than discovered on air.
+    if (!mt_wire_selftest()) {
+        ESP_LOGE(TAG, "NODEINFO ENCODING SELF-TEST FAILED");
+        ui_boot_line("nodeinfo encoding self-test FAILED");
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "meshtastic_wire.h"
+#include <stdio.h>
 #include <string.h>
 
 bool mt_packet_parse(const uint8_t* data, uint8_t size, mt_packet_t* out) {
@@ -254,13 +255,46 @@ bool mt_user_parse(const uint8_t* buf, size_t len, mt_user_t* out) {
     return saw_field;
 }
 
+// One length-delimited field: tag, length, bytes. Returns false if it will not
+// fit, leaving `pos` untouched so the caller's buffer stays consistent.
+static bool write_bytes_field(uint8_t* out, size_t out_max, size_t* pos, uint32_t field, const void* data,
+                              size_t len) {
+    size_t at = *pos;
+
+    size_t n = write_varint(&out[at], out_max - at, (field << 3) | 2);
+    if (n == 0) return false;
+    at += n;
+    n   = write_varint(&out[at], out_max - at, len);
+    if (n == 0) return false;
+    at += n;
+    if (at + len > out_max) return false;
+    memcpy(&out[at], data, len);
+
+    *pos = at + len;
+    return true;
+}
+
+static bool write_varint_field(uint8_t* out, size_t out_max, size_t* pos, uint32_t field, uint64_t value) {
+    size_t at = *pos;
+
+    size_t n = write_varint(&out[at], out_max - at, (field << 3) | 0);
+    if (n == 0) return false;
+    at += n;
+    n   = write_varint(&out[at], out_max - at, value);
+    if (n == 0) return false;
+
+    *pos = at + n;
+    return true;
+}
+
 size_t mt_user_encode(const mt_user_t* user, uint8_t* out, size_t out_max) {
     if (user == NULL || out == NULL) return 0;
 
     size_t pos = 0;
 
-    // Only the fields that identify us. Others are optional and adding them
-    // would cost airtime on a channel that is already duty-cycle limited.
+    // Ascending tag order, as protobuf encoders conventionally emit. Fields at
+    // their default are omitted, which is what proto3 expects and what keeps
+    // this small on a duty-cycle limited channel.
     const struct {
         uint32_t    field;
         const char* value;
@@ -269,28 +303,60 @@ size_t mt_user_encode(const mt_user_t* user, uint8_t* out, size_t out_max) {
     for (size_t i = 0; i < sizeof(strings) / sizeof(strings[0]); i++) {
         size_t len = strlen(strings[i].value);
         if (len == 0) continue;
-
-        size_t n = write_varint(&out[pos], out_max - pos, (strings[i].field << 3) | 2);
-        if (n == 0) return 0;
-        pos += n;
-        n    = write_varint(&out[pos], out_max - pos, len);
-        if (n == 0) return 0;
-        pos += n;
-        if (pos + len > out_max) return 0;
-        memcpy(&out[pos], strings[i].value, len);
-        pos += len;
+        if (!write_bytes_field(out, out_max, &pos, strings[i].field, strings[i].value, len)) return 0;
     }
 
     if (user->hw_model) {
-        size_t n = write_varint(&out[pos], out_max - pos, (5 << 3) | 0);
-        if (n == 0) return 0;
-        pos += n;
-        n    = write_varint(&out[pos], out_max - pos, user->hw_model);
-        if (n == 0) return 0;
-        pos += n;
+        if (!write_varint_field(out, out_max, &pos, 5, user->hw_model)) return 0;
+    }
+    if (user->role) {
+        if (!write_varint_field(out, out_max, &pos, 7, user->role)) return 0;
+    }
+
+    // The Curve25519 key others need to message us end to end. Receivers check
+    // for exactly 32 bytes and ignore anything else, so a short or absent key
+    // reads to them as "no key provided" -- which is what leaving this out did.
+    if (user->has_public_key) {
+        if (!write_bytes_field(out, out_max, &pos, 8, user->public_key, MT_PUBLIC_KEY_LEN)) return 0;
     }
 
     return pos;
+}
+
+// Encoded from the protobuf definition by hand, not by this file:
+//   1 id "!aabbccdd", 2 long_name "Kettu", 3 short_name "fox0",
+//   5 hw_model 255, 8 public_key 01..20. Field 7 is at its default and so
+//   omitted, which is what proto3 requires.
+static const uint8_t USER_VECTOR[] = {
+    0x0a, 0x09, 0x21, 0x61, 0x61, 0x62, 0x62, 0x63, 0x63, 0x64, 0x64, 0x12, 0x05, 0x4b, 0x65, 0x74,
+    0x74, 0x75, 0x1a, 0x04, 0x66, 0x6f, 0x78, 0x30, 0x28, 0xff, 0x01, 0x42, 0x20, 0x01, 0x02, 0x03,
+    0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
+    0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20};
+
+bool mt_wire_selftest(void) {
+    mt_user_t user = {0};
+    snprintf(user.id, sizeof(user.id), "!aabbccdd");
+    snprintf(user.long_name, sizeof(user.long_name), "Kettu");
+    snprintf(user.short_name, sizeof(user.short_name), "fox0");
+    user.hw_model = MT_HW_PRIVATE;
+    for (int i = 0; i < MT_PUBLIC_KEY_LEN; i++) user.public_key[i] = (uint8_t)(i + 1);
+    user.has_public_key = true;
+
+    uint8_t buf[128];
+    size_t  len = mt_user_encode(&user, buf, sizeof(buf));
+    if (len != sizeof(USER_VECTOR) || memcmp(buf, USER_VECTOR, len) != 0) return false;
+
+    // And back, so the two halves cannot drift apart.
+    mt_user_t decoded;
+    if (!mt_user_parse(buf, len, &decoded)) return false;
+    if (strcmp(decoded.id, user.id) != 0) return false;
+    if (strcmp(decoded.long_name, user.long_name) != 0) return false;
+    if (strcmp(decoded.short_name, user.short_name) != 0) return false;
+    if (decoded.hw_model != user.hw_model) return false;
+    if (!decoded.has_public_key) return false;
+    if (memcmp(decoded.public_key, user.public_key, MT_PUBLIC_KEY_LEN) != 0) return false;
+
+    return true;
 }
 
 const char* mt_portnum_name(uint32_t portnum) {

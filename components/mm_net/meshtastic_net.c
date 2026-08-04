@@ -436,6 +436,7 @@ static uint8_t meshtastic_encode_advert(mesh_state_t* mesh, uint8_t channel, con
     snprintf(user.id, sizeof(user.id), "%s", identity->node_id);
     snprintf(user.long_name, sizeof(user.long_name), "%s", identity->name);
     snprintf(user.short_name, sizeof(user.short_name), "%s", identity->short_name);
+    user.hw_model = MT_HW_PRIVATE;  // a Tanmatsu is not one of upstream's boards
     if (identity->has_mt_keypair) {
         memcpy(user.public_key, identity->mt_public_key, MT_PUBLIC_KEY_LEN);
         user.has_public_key = true;

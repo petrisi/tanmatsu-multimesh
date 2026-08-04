@@ -4,6 +4,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         mm_crypto
+        mm_proto
         mm_domain
         mm_net
         mm_radio

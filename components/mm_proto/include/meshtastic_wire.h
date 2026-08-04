@@ -86,6 +86,11 @@ uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_lim
 #define MT_USER_SHORT_MAX 7
 #define MT_PUBLIC_KEY_LEN 32
 
+// HardwareModel.PRIVATE_HW: the value upstream reserves for hardware that is not
+// one of its own board types. More honest than leaving the field at UNSET, which
+// clients render as an empty hardware column.
+#define MT_HW_PRIVATE 255
+
 typedef struct {
     char    id[16];  // "!aabbccdd"
     char    long_name[MT_USER_NAME_MAX + 1];
@@ -100,5 +105,14 @@ typedef struct {
 // newer sender with extra fields still parses.
 bool   mt_user_parse(const uint8_t* buf, size_t len, mt_user_t* out);
 size_t mt_user_encode(const mt_user_t* user, uint8_t* out, size_t out_max);
+
+// Check the NodeInfo encoding against bytes computed from the protobuf spec
+// rather than by this code.
+//
+// Worth a boot-time check because the failure is invisible from here: a missing
+// or malformed field encodes cleanly, transmits cleanly, and simply never
+// appears on the other node -- which is how the public key went out empty for
+// several releases while everything looked fine locally.
+bool mt_wire_selftest(void);
 
 const char* mt_portnum_name(uint32_t portnum);
