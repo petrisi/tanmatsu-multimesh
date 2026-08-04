@@ -3,6 +3,10 @@
 # The device must be in BadgeLink mode (violet diamond on the launcher home
 # screen). Stop recording first -- fn + yellow square -- so the last writes are
 # flushed before the file is read.
+#
+# Note the path. The app mounts the internal partition at /locfd, but BadgeLink
+# talks to the launcher, which mounts the same partition at /int. Same bytes,
+# different name, and only the launcher's name works from here.
 
 param(
     [string] $Out = "session.log"
@@ -15,16 +19,21 @@ if (-not $device) {
     throw "Badge not found. Put the device in BadgeLink mode: violet diamond on the launcher home screen."
 }
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$py   = Join-Path $here "..\.venv\Scripts\python.exe"
-if (-not (Test-Path $py)) { $py = "python" }
+$badgelink = Join-Path $PSScriptRoot "badgelink"
+$py        = Join-Path $badgelink ".venv\Scripts\python.exe"
+if (-not (Test-Path $py)) { throw "BadgeLink venv missing at $py" }
 
-Push-Location (Join-Path $here "badgelink")
+# Absolute, because badgelink runs from its own directory.
+$target = if ([System.IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path (Get-Location) $Out }
+
+Push-Location $badgelink
 try {
-    & $py badgelink.py fs download "/locfd/multimesh/session.log" $Out
+    & $py badgelink.py fs download "/int/multimesh/session.log" $target
+    if ($LASTEXITCODE -ne 0) { throw "fs download failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
 }
+$Out = $target
 
 if (Test-Path $Out) {
     $size = (Get-Item $Out).Length
