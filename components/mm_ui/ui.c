@@ -692,7 +692,16 @@ static void draw_hints(const app_model_t* model) {
         return;
     }
 
-    x = hint(x, hint_y + 1, CAP_CROSS, "exit");
+    // The red cross escalates: clear, then leave the conversation, then leave
+    // the app. Label it with whichever it will actually do next, so leaving a
+    // private conversation is never a guess.
+    const char* escape = "exit";
+    if (model->composer_len > 0) {
+        escape = "clear";
+    } else if (mesh->target_contact) {
+        escape = "leave DM";
+    }
+    x = hint(x, hint_y + 1, CAP_CROSS, escape);
     x = hint(x, hint_y + 1, CAP_TRI, model->active == MESH_MC ? "MT" : "MC");
     x = hint(x, hint_y + 1, CAP_SQUARE, model->show_meta ? "meta on" : "meta off");
     x = hint(x, hint_y + 1, CAP_CIRCLE, "nodes");

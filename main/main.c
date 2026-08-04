@@ -542,9 +542,31 @@ static bool radio_poll(void) {
 static void next_channel(int delta) {
     mesh_state_t* mesh = model_active(&model);
     if (mesh->channel_count == 0) return;
-    mesh->input_channel = (mesh->input_channel + delta + mesh->channel_count) % mesh->channel_count;
+
+    // Cycling channels while aimed at a contact used to move `input_channel`
+    // underneath an unchanged status chip -- so the next message still went to
+    // the contact, on a channel the user had silently changed. Stepping the
+    // channel means the channel is now the target.
+    if (mesh->target_contact) {
+        mesh->target_contact = false;
+    } else {
+        mesh->input_channel = (mesh->input_channel + delta + mesh->channel_count) % mesh->channel_count;
+    }
     settings_save_prefs(&model);
     toast("sending to %s", mesh->channels[mesh->input_channel].name);
+}
+
+// Leave a conversation and aim at the channel again. Returns false when there
+// was no conversation to leave, so the caller can fall through to whatever it
+// would otherwise have done.
+static bool leave_conversation(void) {
+    mesh_state_t* mesh = model_active(&model);
+    if (!mesh->target_contact) return false;
+
+    mesh->target_contact = false;
+    settings_save_prefs(&model);
+    toast("sending to %s", mesh->channels[mesh->input_channel].name);
+    return true;
 }
 
 static void scroll_by(int lines) {
@@ -1082,9 +1104,15 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
 
     switch (key) {
         case BSP_INPUT_NAVIGATION_KEY_F1:  // red cross
+            // Escalating escape: clear what you typed, then leave the
+            // conversation, then leave the app. Each step is the smallest thing
+            // the key could plausibly mean at that moment, and the shortcut bar
+            // relabels itself so it is never a guess.
             if (model.composer_len > 0) {
                 composer_set("");
                 toast("cleared");
+            } else if (leave_conversation()) {
+                // done
             } else {
                 ESP_LOGI(TAG, "exit to launcher");
                 bsp_device_restart_to_launcher();
@@ -1102,8 +1130,23 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
             break;
         case BSP_INPUT_NAVIGATION_KEY_F5: open_identity(); break;
         case BSP_INPUT_NAVIGATION_KEY_F6:
-            model.overlay      = OVERLAY_PICKER;
+            model.overlay = OVERLAY_PICKER;
+            // Open on whatever is currently selected, contact rows included, so
+            // the list opens where the user left it rather than at the top.
             model.picker_index = mesh->input_channel;
+            if (mesh->target_contact) {
+                int order[MAX_NODES];
+                int contacts = model_nodes_by_recency(mesh, order, MAX_NODES);
+                for (int i = 0; i < contacts; i++) {
+                    node_t* node = &mesh->nodes[order[i]];
+                    bool    same = model.active == MESH_MT ? node->node_num == mesh->target_num
+                                                           : memcmp(node->key, mesh->target_key, NODE_KEY_LEN) == 0;
+                    if (same) {
+                        model.picker_index = mesh->channel_count + i;
+                        break;
+                    }
+                }
+            }
             break;
 
         case BSP_INPUT_NAVIGATION_KEY_TAB: next_channel(1); break;
