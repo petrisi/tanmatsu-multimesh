@@ -600,8 +600,14 @@ static void draw_messages(const app_model_t* model) {
             // rather than repeating the same name on every row.
             char chan[SENDER_MAX + 2];
             if (msg->dm) {
-                chan[0] = msg->outgoing ? '>' : '<';
-                utf8_clip(chan + 1, sizeof(chan) - 1, short_label(mesh, msg->peer), chan_cells(model) - 1);
+                // The direction arrow lives in the gutter between the timestamp
+                // and this column, which is otherwise blank. It is a marker
+                // about the message rather than part of anyone's name, and
+                // putting it here buys the name back the cell it was eating --
+                // which matters when four characters is all a name gets.
+                pax_draw_text(&fb, COL_DM, FONT, FONT_SIZE, x_chan() - CHAR_W, y, msg->outgoing ? ">" : "<");
+
+                utf8_clip(chan, sizeof(chan), short_label(mesh, msg->peer), chan_cells(model));
                 pax_draw_text(&fb, COL_DM, FONT, FONT_SIZE, x_chan(), y, chan);
             } else {
                 utf8_clip(chan, sizeof(chan), ch->display, chan_cells(model));
