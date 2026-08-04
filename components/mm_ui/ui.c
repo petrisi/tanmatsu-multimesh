@@ -41,6 +41,8 @@ static const char TAG[] = "ui";
 #define COL_RISK    0xFFF08030  // allowed, but unlikely to survive the trip
 #define COL_MC_ARC  0xFF4FA8FF  // the two networks on the boot mast, bright enough
 #define COL_MT_ARC  0xFF5FD07A  // to read as colour rather than tint
+#define COL_LOGO_MC 0xFFCFE4FF  // the wordmark, tinted toward each network but
+#define COL_LOGO_MT 0xFFCFF0DA  // pale enough to stay one piece of lettering
 
 // Keycap colours, matched to the physical legends on the top row.
 #define KEY_RED    0xFFE24B4B
@@ -195,9 +197,11 @@ void ui_boot_line(const char* fmt, ...) {
         boot_mast_line(BOOT_MAST[i], y);
     }
 
+    // The two words carry the two networks' tints, close enough to read as one
+    // wordmark and far enough apart to read as two words.
     y += LINE_H;
-    for (int i = 0; i < 5; i++, y += LINE_H) boot_centred(GLYPH_MULTI[i], y, COL_TEXT);
-    for (int i = 0; i < 5; i++, y += LINE_H) boot_centred(GLYPH_MESH[i], y, COL_TEXT);
+    for (int i = 0; i < 5; i++, y += LINE_H) boot_centred(GLYPH_MULTI[i], y, COL_LOGO_MC);
+    for (int i = 0; i < 5; i++, y += LINE_H) boot_centred(GLYPH_MESH[i], y, COL_LOGO_MT);
 
     y += LINE_H;
     boot_centred("MeshCore  +  Meshtastic", y, COL_DIM);
