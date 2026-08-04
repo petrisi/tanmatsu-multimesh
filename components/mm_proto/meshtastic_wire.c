@@ -261,11 +261,33 @@ uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_lim
                         ((hop_limit << MT_FLAGS_HOP_START_SHIFT) & MT_FLAGS_HOP_START_MASK) |
                         (want_ack ? MT_FLAGS_WANT_ACK_MASK : 0));
     out[13] = channel_hash;
-    out[14] = 0;  // next_hop: unset, we do not use routed delivery
-    out[15] = 0;  // relay_node: filled in by whoever relays us
+    out[14] = MT_NEXT_HOP_NONE;  // we do not use routed delivery
+    // The last relayer, which for a packet we originate is us. Upstream sets
+    // this on its own sends too, not only when forwarding, and other nodes use
+    // it to work out who they heard a packet from.
+    out[15] = (uint8_t)from;
 
     memcpy(&out[MT_HEADER_SIZE], payload, payload_len);
     return (uint8_t)total;
+}
+
+uint8_t mt_packet_relay(const uint8_t* frame, uint8_t frame_len, uint8_t relay_node, bool decrement, uint8_t* out,
+                        size_t out_max) {
+    if (frame == NULL || out == NULL) return 0;
+    if (frame_len < MT_HEADER_SIZE || frame_len > out_max) return 0;
+
+    uint8_t flags     = frame[12];
+    uint8_t hop_limit = flags & MT_FLAGS_HOP_LIMIT_MASK;
+    if (decrement) {
+        if (hop_limit == 0) return 0;  // out of hops; it dies here
+        hop_limit--;
+    }
+
+    memcpy(out, frame, frame_len);
+    out[12] = (uint8_t)((flags & ~MT_FLAGS_HOP_LIMIT_MASK) | hop_limit);
+    out[14] = MT_NEXT_HOP_NONE;  // we flood; we have no next hop to name
+    out[15] = relay_node;
+    return frame_len;
 }
 
 // Copy a length-delimited protobuf string into a fixed buffer, always

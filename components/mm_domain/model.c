@@ -58,17 +58,23 @@ void model_init(app_model_t* model) {
     model->mt_active_hops       = model->settings.mt_default_hops;
 }
 
-int settings_visible_fields(mesh_id_t active, setting_field_t* out, int max) {
+int settings_visible_fields(mesh_id_t active, const settings_t* settings, setting_field_t* out, int max) {
     static const setting_field_t shared[] = {SET_FIELD_LATITUDE, SET_FIELD_LONGITUDE, SET_FIELD_DISPLAY_OFF};
-    static const setting_field_t mt[]     = {SET_FIELD_MT_HOPS, SET_FIELD_MT_ROLE};
-    static const setting_field_t mc[]     = {SET_FIELD_MC_REPEATER};
 
     int n = 0;
     for (size_t i = 0; i < sizeof(shared) / sizeof(shared[0]) && n < max; i++) out[n++] = shared[i];
 
-    const setting_field_t* own   = active == MESH_MT ? mt : mc;
-    size_t                 count = active == MESH_MT ? sizeof(mt) / sizeof(mt[0]) : sizeof(mc) / sizeof(mc[0]);
-    for (size_t i = 0; i < count && n < max; i++) out[n++] = own[i];
+    if (active == MESH_MT) {
+        if (n < max) out[n++] = SET_FIELD_MT_HOPS;
+        if (n < max) out[n++] = SET_FIELD_MT_ROLE;
+        // Only a CLIENT relays, so only a CLIENT gets to say how.
+        if (settings != NULL && settings->mt_role == MT_ROLE_CLIENT) {
+            if (n < max) out[n++] = SET_FIELD_MT_ALWAYS_REPEAT;
+            if (n < max) out[n++] = SET_FIELD_MT_OPTIMIZE;
+        }
+    } else {
+        if (n < max) out[n++] = SET_FIELD_MC_REPEATER;
+    }
 
     return n;
 }

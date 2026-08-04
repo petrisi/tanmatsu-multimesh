@@ -192,6 +192,65 @@ repeater. Dedup keys differ: Meshtastic has an `(from, id)` header pair,
 MeshCore has no packet id but an unchanged payload, so that is fingerprinted.
 Dedup covers direct messages as well as broadcasts.
 
+### Meshtastic relaying
+
+At role CLIENT this app forwards other people's packets; at CLIENT_MUTE it does
+not, which is what CLIENT_MUTE advertises and why it is the default. The hard
+rules are upstream's and hold in every mode: never a packet addressed to us,
+never one of ours, never one already at `hop_limit 0`, never one we have relayed
+before, never the reserved non-LoRa broadcast address (`to == 1`), and never one
+whose `next_hop` names a node that is not us.
+
+A relay rewrites exactly two header bytes — `hop_limit` and `relay_node` — on
+the frame as received. It does not re-encode: the payload may be encrypted, on a
+channel we do not hold, or carry protobuf fields this build does not know, and a
+decode/encode round trip would silently drop all three. `hop_start` is left
+alone, because receivers compute distance as `hop_start − hop_limit` and a relay
+that moved it would make every node downstream misjudge how far away the sender
+is. `relay_node` is the low byte of our node number, which upstream also sets on
+its own transmissions and not only when forwarding.
+
+**The backoff is the interesting part.** Every node in earshot hears a packet in
+the same instant, so they must be scattered — and Meshtastic scatters them *by
+received signal strength, deliberately the wrong way round*. A strong signal
+means the sender is close, which means relaying adds little coverage, so a strong
+signal buys a **longer** wait. The distant node that would actually extend the
+mesh goes first, and everyone nearer hears it and stands down.
+
+The scale is a contention window of `2^CWsize` slots, `CWsize = map(snr, −20,
++10, 3, 8)`, on top of a fixed `2 × CWmax` slot offset that keeps ordinary nodes
+clear of the window routers use. A slot is `2.5 symbols + 7.6 ms`, so at SF8 /
+62.5 kHz it is 17 ms:
+
+| rx SNR | CWsize | Normal window | Late slot |
+|---|---|---|---|
+| −20 dB | 3 | 272 – 391 ms | 408 ms |
+| −10 dB | 4 | 272 – 527 ms | 544 ms |
+| 0 dB | 6 | 272 – 1343 ms | 1360 ms |
+| +10 dB | 8 | 272 – 4607 ms | 4624 ms |
+
+Hearing a second copy of something still queued does three things: if the new
+copy has *more* hops left, it replaces ours, since the one that has travelled
+less far will reach further; then either the relay is cancelled (plain CLIENT) or
+moved to the late slot (**always repeat**), which is upstream's ROUTER_LATE
+behaviour without the router's early window or its advertised role. An
+acknowledgement or reply for somebody else's direct message also cancels a queued
+relay of it outright — the reply proves it arrived, so carrying it further is
+pure airtime.
+
+**Optimize text** filters on the decoded portnum: only `TEXT_MESSAGE_APP` (1) and
+`ROUTING_APP` (5) are carried, and what is carried keeps its hop limit rather
+than spending one. Traffic we cannot decrypt — a direct message, or a channel we
+do not hold — has no portnum to judge, so it is relayed normally; dropping it
+would stop us carrying every DM on the mesh, and upstream's `CORE_PORTNUMS_ONLY`
+makes the same choice.
+
+Not decrementing is a deliberate divergence with a cost worth stating: nodes
+downstream will underestimate how far away the sender is, and a message's reach
+is no longer bounded by the hop count its sender chose. It still terminates —
+dedup means each node relays a given `(from, id)` at most once — but it travels
+further than a plain mesh would carry it.
+
 **Off-grid repeat** *(MeshCore)* makes this client forward other nodes' packets
 so a handful of ordinary clients can give each other extra hops with no deployed
 infrastructure. Flooded packets are re-sent after a random backoff derived from

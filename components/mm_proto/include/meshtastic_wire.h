@@ -30,6 +30,14 @@
 #define MT_PORTNUM_ROUTING      5
 #define MT_PORTNUM_TELEMETRY    67
 
+// Reserved destination meaning "deliver over MQTT or BLE only". Nobody puts it
+// on the air, so a relay must not either.
+#define MT_ADDR_BROADCAST_NO_LORA 1u
+
+// No routing preference: flood it. The alternative is the last byte of the node
+// that should carry it onward, which we neither learn nor originate.
+#define MT_NEXT_HOP_NONE 0
+
 typedef struct {
     uint32_t to;
     uint32_t from;
@@ -107,6 +115,27 @@ bool mt_routing_is_ack(const uint8_t* payload, size_t len);
 // meaningful on a packet addressed to one node: nobody acknowledges a broadcast.
 uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_limit, uint8_t channel_hash,
                         bool want_ack, const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max);
+
+// Re-frame a received packet for relaying: copy it unchanged and rewrite only
+// `hop_limit` and `relay_node` in the header.
+//
+// Rewriting rather than re-encoding is the point. The payload is still
+// encrypted, or on a channel we do not hold, or carries protobuf fields this
+// build does not know about -- and a decode/encode round trip would silently
+// drop every one of those. The header is the only part a relay is entitled to
+// touch, so it is the only part that is touched.
+//
+// `hop_start` is deliberately left alone: receivers compute distance as start
+// minus limit, and a relay that moved it would make every node downstream
+// misjudge how far away the sender is.
+//
+// `decrement` false keeps the hop limit as it arrived -- for text under
+// "optimize for text", where the packet gets a free ride through us.
+//
+// Returns the frame length, or 0 if the frame is unusable (too short, too long
+// for `out`, or already out of hops when a decrement was asked for).
+uint8_t mt_packet_relay(const uint8_t* frame, uint8_t frame_len, uint8_t relay_node, bool decrement, uint8_t* out,
+                        size_t out_max);
 
 // The User submessage carried on NODEINFO_APP: how a node announces its names
 // and key. Note the node *number* is not in here -- it comes from the packet

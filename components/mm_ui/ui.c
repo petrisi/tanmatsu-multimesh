@@ -562,14 +562,17 @@ static void draw_status(const app_model_t* model) {
         pax_draw_text(&fb, COL_BAD, FONT, FONT_SIZE, x, 4, "REC");
     }
 
-    // Off-grid repeat: present only when it is on, so it never takes space it
-    // has no use for. Dim while idle, bright for a moment each time a packet is
-    // relayed, and carrying the count -- which is the part worth having, since
-    // repeating for nobody looks exactly like repeating for everybody.
-    if (model->active == MESH_MC && model->settings.mc_repeater) {
-        char badge[12];
-        snprintf(badge, sizeof(badge), "RPT %lu", (unsigned long)(model->repeat_count > 999 ? 999
-                                                                                            : model->repeat_count));
+    // Relaying: MeshCore off-grid repeat, or a Meshtastic CLIENT forwarding for
+    // others. Present only when it is on, so it never takes space it has no use
+    // for. Dim while idle, bright for a moment each time a packet is relayed,
+    // and carrying the count -- which is the part worth having, since repeating
+    // for nobody looks exactly like repeating for everybody.
+    bool relaying = model->active == MESH_MC ? model->settings.mc_repeater
+                                             : model->settings.mt_role == MT_ROLE_CLIENT;
+    if (relaying) {
+        uint32_t count = model->repeat_count[model->active];
+        char     badge[12];
+        snprintf(badge, sizeof(badge), "RPT %lu", (unsigned long)(count > 999 ? 999 : count));
         x -= 6 + (float)strlen(badge) * CHAR_W;
         pax_draw_text(&fb, model->repeat_busy ? COL_OK : COL_DIM, FONT, FONT_SIZE, x, 4, badge);
     }
@@ -1623,6 +1626,19 @@ static void setting_row(const app_model_t* model, setting_field_t field, char* l
         case SET_FIELD_MT_ROLE:
             snprintf(label, label_size, "Role");
             snprintf(value, value_size, "%s", s->mt_role == MT_ROLE_CLIENT ? "CLIENT" : "CLIENT_MUTE");
+            // Green for the role that carries traffic for others, matching the
+            // two relay rows below it.
+            *col = s->mt_role == MT_ROLE_CLIENT ? COL_OK : COL_DIM;
+            break;
+        case SET_FIELD_MT_ALWAYS_REPEAT:
+            snprintf(label, label_size, "Always repeat");
+            snprintf(value, value_size, "%s", s->mt_always_repeat ? "on" : "off");
+            *col = s->mt_always_repeat ? COL_OK : COL_DIM;
+            break;
+        case SET_FIELD_MT_OPTIMIZE:
+            snprintf(label, label_size, "Optimize text");
+            snprintf(value, value_size, "%s", s->mt_optimize_text ? "on" : "off");
+            *col = s->mt_optimize_text ? COL_OK : COL_DIM;
             break;
         case SET_FIELD_MC_REPEATER:
             snprintf(label, label_size, "Off-grid repeat");
@@ -1637,7 +1653,7 @@ static void draw_settings(const app_model_t* model) {
     const mesh_state_t* mesh = &model->mesh[model->active];
 
     setting_field_t fields[SET_FIELD_COUNT];
-    int             count = settings_visible_fields(model->active, fields, SET_FIELD_COUNT);
+    int             count = settings_visible_fields(model->active, &model->settings, fields, SET_FIELD_COUNT);
 
     float bw = 52 * CHAR_W;
     float bh = LINE_H * (count + 8) + 12;
@@ -1686,7 +1702,9 @@ static void draw_settings(const app_model_t* model) {
         case SET_FIELD_LONGITUDE: note = "sent in every MeshCore advert once set"; break;
         case SET_FIELD_DISPLAY_OFF: note = "backlight only - radio keeps running"; break;
         case SET_FIELD_MT_HOPS: note = "resets here at start; fn+0..7 for now"; break;
-        case SET_FIELD_MT_ROLE: note = "what we tell others we do with traffic"; break;
+        case SET_FIELD_MT_ROLE: note = "CLIENT forwards for others, MUTE listens only"; break;
+        case SET_FIELD_MT_ALWAYS_REPEAT: note = "repeat last, even if another node already did"; break;
+        case SET_FIELD_MT_OPTIMIZE: note = "carry text and acks only, and keep their hops"; break;
         case SET_FIELD_MC_REPEATER: note = "forward others' packets to extend the mesh"; break;
         default: break;
     }

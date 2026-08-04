@@ -50,8 +50,9 @@ reflash.
   frame.
 - **MeshCore route learning** — flood until the contact returns a path, then send
   directly along it, with a retry ladder back to flooding when it stops working.
-- **Off-grid repeat** *(MeshCore)* — optionally forward other nodes' packets so a
-  handful of clients can extend each other's range with no infrastructure.
+- **Relaying on both networks** — MeshCore off-grid repeat, and a Meshtastic
+  CLIENT that really does forward for others, with SNR-weighted backoff and two
+  refinements upstream does not offer together.
 - **A persistent node list** with per-node detail, short names, route management
   and Meshtastic key exchange.
 - **A Finnish keyboard layer** — å ö ä where a Finnish QWERTY puts them, on a
@@ -69,9 +70,8 @@ sides of every feature listed above.
 > cycle in the EU and nothing in this app enforces it. Treat this as lab and
 > experimental use until it does.
 
-Also not implemented: message history persistence, position and telemetry
-reporting, and Meshtastic relaying — the app advertises `CLIENT_MUTE` by default
-precisely because that is the truthful role while it does not relay.
+Also not implemented: message history persistence, and position and telemetry
+reporting.
 
 ## Hardware
 
@@ -166,8 +166,16 @@ stays on that one while open.
 | Location | latitude and longitude, optional. Once set it goes out in **every MeshCore advert** — published to everyone in range and everyone they relay to. Decimal degrees; both coordinates or neither. |
 | Screen off | minutes of no input before the backlight goes dark, 0 = never. Backlight only: the panel and the radio keep running and messages keep arriving. The key that wakes it is swallowed. |
 | Hop limit *(MT)* | 0–5. The value the active limit **resets to at every start**. |
-| Role *(MT)* | CLIENT or CLIENT_MUTE, advertised in NodeInfo. Defaults to CLIENT_MUTE. |
+| Role *(MT)* | CLIENT or CLIENT_MUTE, advertised in NodeInfo. CLIENT forwards other nodes' packets; CLIENT_MUTE listens only, and is the default. |
+| Always repeat *(MT, CLIENT only)* | repeat even when another node already did, going last so we only add coverage nobody else provided. This is upstream's ROUTER_LATE behaviour without the router's early slot. |
+| Optimize text *(MT, CLIENT only)* | carry only text messages and acknowledgements, and let them keep their hop limit. Traffic we cannot decrypt is relayed normally — it has no readable type to judge. |
 | Off-grid repeat *(MC)* | forward other nodes' packets to extend the mesh. Off by default, because a mesh where everyone repeats everything spends its airtime on itself. |
+
+The two Meshtastic relay settings are shown only at role CLIENT, since at
+CLIENT_MUTE they would be controls for something that cannot happen. They are
+not mutually exclusive, and with both off a CLIENT behaves like any other
+Meshtastic client. `RPT <n>` on the status bar counts what has actually been
+forwarded, per network.
 
 **`fn` + `0`…`7`** sets the Meshtastic hop limit for the current session only. It
 reaches 7 where the stored setting stops at 5, on the grounds that a limit worth

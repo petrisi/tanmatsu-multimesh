@@ -230,6 +230,8 @@ typedef struct __attribute__((packed)) {
     uint8_t mt_default_hops;
     uint8_t mt_role;
     uint8_t mc_repeater;
+    uint8_t mt_always_repeat;
+    uint8_t mt_optimize_text;
 } stored_config_t;
 
 void settings_save_config(const app_model_t* model) {
@@ -243,6 +245,8 @@ void settings_save_config(const app_model_t* model) {
           .mt_default_hops     = s->mt_default_hops,
           .mt_role             = s->mt_role,
           .mc_repeater         = s->mc_repeater ? 1 : 0,
+          .mt_always_repeat    = s->mt_always_repeat ? 1 : 0,
+          .mt_optimize_text    = s->mt_optimize_text ? 1 : 0,
     };
     write_blob(KEY_CONFIG, &stored, sizeof(stored));
 }
@@ -266,6 +270,12 @@ static void load_config(app_model_t* model) {
     // limits must not put an illegal hop count on the air.
     s->mt_default_hops = stored.mt_default_hops > SET_HOPS_MAX_STORED ? SET_HOPS_MAX_STORED : stored.mt_default_hops;
     s->mt_role         = stored.mt_role > MT_ROLE_CLIENT_MUTE ? MT_ROLE_CLIENT_MUTE : stored.mt_role;
+
+    // Only meaningful at CLIENT, but stored as written rather than forced off
+    // here: a user who switches to CLIENT_MUTE and back should find their relay
+    // settings as they left them.
+    s->mt_always_repeat = stored.mt_always_repeat != 0;
+    s->mt_optimize_text = stored.mt_optimize_text != 0;
 
     // The active limit always starts from the stored default; a session that
     // raised it does not get to make that permanent by outliving the reboot.
@@ -316,7 +326,10 @@ bool settings_load_mt_keypair(identity_t* identity, bool (*generate)(uint8_t pub
     if (!identity->has_mt_keypair) {
         memset(identity->mt_private_key, 0, sizeof(identity->mt_private_key));
         memset(identity->mt_public_key, 0, sizeof(identity->mt_public_key));
-        ESP_LOGE(TAG, "no Meshtastic encryption key; direct messages fall back to the channel");
+        // There is no fallback to lose: current firmware refuses to send a
+        // keyless direct message and discards one that arrives, so without this
+        // key Meshtastic direct messages are simply unavailable.
+        ESP_LOGE(TAG, "no Meshtastic encryption key; direct messages unavailable");
     }
     return identity->has_mt_keypair;
 }

@@ -159,9 +159,11 @@ static bool drain_crypto(void) {
 // and discarded instead: it can only hold something queued moments before a
 // switch, and an acknowledgement that arrives after a detour through another
 // band is too late to stop the sender retrying anyway.
-// Put MeshCore repeats on the air once their backoff has elapsed. Only while
-// MeshCore is the active network, for the same reason acknowledgements are:
-// there is one radio, and it is tuned to one network.
+// Put relayed frames on the air once their backoff has elapsed -- MeshCore
+// off-grid repeat, or a Meshtastic CLIENT forwarding for others. Both stacks
+// hold their own queue and decide their own timing; the loop only asks whether
+// anything is due, because it is the loop that owns the transmitter.
+//
 // How long the repeat badge stays lit after a relay. Long enough to notice on a
 // glance, short enough that a steady stream still reads as flickering rather
 // than as permanently on.
@@ -174,13 +176,16 @@ static void forward_repeats(void) {
     // loop has to know what time it is.
     model.repeat_busy = last_repeat_ms != 0 && (now_ms() - last_repeat_ms) < REPEAT_BLINK_MS;
 
-    if (model.active != MESH_MC) return;
+    // Only the active network's queue is drained. There is one radio and it is
+    // tuned to one network; a frame relayed onto the other one would be noise
+    // on a band nobody there is listening to.
+    tx_request_t request = {.mesh = model.active, .seq = UINT32_MAX};
+    bool (*take)(uint8_t*, size_t, uint8_t*) = model.active == MESH_MC ? mc_take_due_repeat : mt_take_due_repeat;
 
-    tx_request_t request = {.mesh = MESH_MC, .seq = UINT32_MAX};
-    while (mc_take_due_repeat(request.frame, sizeof(request.frame), &request.length)) {
+    while (take(request.frame, sizeof(request.frame), &request.length)) {
         if (xQueueSend(tx_requests, &request, 0) != pdTRUE) return;
 
-        model.repeat_count++;
+        model.repeat_count[model.active]++;
         last_repeat_ms    = now_ms();
         model.repeat_busy = true;
     }
@@ -193,6 +198,9 @@ static void apply_settings(void) {
     mc_set_location(model.settings.has_location, model.settings.latitude, model.settings.longitude);
     mt_set_hop_limit(model.mt_active_hops);
     mt_set_role(model.settings.mt_role);
+    // Relaying is what CLIENT means; the two refinements only apply once it is.
+    mt_set_relay(model.settings.mt_role == MT_ROLE_CLIENT, model.settings.mt_always_repeat,
+                 model.settings.mt_optimize_text);
 }
 
 static void forward_acks(void) {
@@ -1374,6 +1382,14 @@ static bool settings_commit(void) {
     return true;
 }
 
+// Keep the cursor inside the list. The Meshtastic rows appear and disappear
+// with the role, so the count is not fixed for the life of the screen.
+static void clamp_setting_index(void) {
+    setting_field_t fields[SET_FIELD_COUNT];
+    int             count = settings_visible_fields(model.active, &model.settings, fields, SET_FIELD_COUNT);
+    if (count > 0 && model.setting_index >= count) model.setting_index = count - 1;
+}
+
 static void setting_step(setting_field_t field, int delta) {
     settings_t* s = &model.settings;
 
@@ -1397,7 +1413,12 @@ static void setting_step(setting_field_t field, int delta) {
         }
         case SET_FIELD_MT_ROLE:
             s->mt_role = s->mt_role == MT_ROLE_CLIENT ? MT_ROLE_CLIENT_MUTE : MT_ROLE_CLIENT;
+            // CLIENT_MUTE takes two rows away with it, so a cursor sitting on
+            // one of them would be pointing past the end of the list.
+            clamp_setting_index();
             break;
+        case SET_FIELD_MT_ALWAYS_REPEAT: s->mt_always_repeat = !s->mt_always_repeat; break;
+        case SET_FIELD_MT_OPTIMIZE: s->mt_optimize_text = !s->mt_optimize_text; break;
         case SET_FIELD_MC_REPEATER: s->mc_repeater = !s->mc_repeater; break;
         default: break;  // the coordinates are typed, not stepped
     }
@@ -1405,7 +1426,7 @@ static void setting_step(setting_field_t field, int delta) {
 
 static char* setting_focused_text(int* out_max) {
     setting_field_t fields[SET_FIELD_COUNT];
-    int             count = settings_visible_fields(model.active, fields, SET_FIELD_COUNT);
+    int             count = settings_visible_fields(model.active, &model.settings, fields, SET_FIELD_COUNT);
     if (model.setting_index < 0 || model.setting_index >= count) return NULL;
 
     *out_max = SET_COORD_MAX;
@@ -1416,8 +1437,9 @@ static char* setting_focused_text(int* out_max) {
 
 static void handle_settings_key(bsp_input_navigation_key_t key) {
     setting_field_t fields[SET_FIELD_COUNT];
-    int             count = settings_visible_fields(model.active, fields, SET_FIELD_COUNT);
+    int             count = settings_visible_fields(model.active, &model.settings, fields, SET_FIELD_COUNT);
     if (count < 1) return;
+    if (model.setting_index >= count) model.setting_index = count - 1;
 
     switch (key) {
         case BSP_INPUT_NAVIGATION_KEY_UP:

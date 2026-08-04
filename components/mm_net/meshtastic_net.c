@@ -36,6 +36,9 @@ static const char TAG[] = "net_mt";
 #define EFL_PREAMBLE    16
 #define EFL_POWER       22  // module maximum; EU_868 permits 27
 
+#define MT_BROADCAST_ADDR 0xFFFFFFFFu
+#define MT_DEFAULT_HOPS   3
+
 static uint32_t text_msgs   = 0;
 static uint32_t other_ports = 0;
 static dedup_t  seen;
@@ -227,11 +230,235 @@ static bool meshtastic_take_pending_ack(uint8_t* out, size_t out_max, uint8_t* o
     return false;
 }
 
+// --- relaying ------------------------------------------------------------
+//
+// A Meshtastic CLIENT forwards other people's packets. CLIENT_MUTE does not,
+// which is why it is the default here: relaying costs battery and airtime, and
+// a handheld in a pocket makes a poor repeater. Turned on, this is what the
+// role has always claimed we do.
+//
+// The delay is the whole of the difficulty, and Meshtastic's answer is more
+// interesting than a plain random backoff. Every node in earshot hears the same
+// packet in the same instant, so they must be scattered; but they are scattered
+// *by received signal strength*, and deliberately the wrong way round. A strong
+// signal means the sender is close, which means relaying adds little coverage,
+// so a strong signal buys a LONGER wait. The distant node that would actually
+// extend the mesh goes first, and everyone nearer hears it and stands down.
+//
+// The scale is a contention window of 2^CWsize slots, CWsize running 3..8 with
+// the SNR, on top of a fixed offset that keeps ordinary nodes clear of the
+// window routers use. At our SF8 / 62.5 kHz that is a 17 ms slot, so:
+//
+//   very weak (-20 dB)   272 - 391 ms
+//   middling  (  0 dB)   272 - 1343 ms
+//   very loud (+10 dB)   272 - 4607 ms
+//
+// Slot time and window sizes are upstream's; see RadioInterface::computeSlotTimeMsec
+// and getTxDelayMsecWeighted.
+#define MT_CW_MIN 3
+#define MT_CW_MAX 8
+
+// 2.5 symbols of CAD plus 7.6 ms of propagation, turnaround and MAC time. The
+// symbol time is 2^SF / bandwidth, which for SF8 at 62.5 kHz is 4.096 ms.
+#define MT_SLOT_TIME_MS ((uint32_t)((2.5f * ((float)(1u << EFL_SF) / 62.5f)) + 7.6f))
+
+// How many frames may be waiting for their slot. The window reaches ~4.6 s at
+// high SNR, so this needs more depth than a simple backoff would.
+#define MT_MAX_PENDING_REPEATS 8
+
+typedef struct {
+    bool     active;
+    bool     late;  // already pushed to the end; do not push twice
+    uint32_t due_ms;
+    uint32_t from;
+    uint32_t id;
+    uint8_t  hop_limit;  // what the copy we hold carries, for the upgrade check
+    float    snr;
+    uint8_t  frame[MT_HEADER_SIZE + MT_MAX_PAYLOAD_SIZE];
+    uint8_t  length;
+} mt_pending_repeat_t;
+
+static mt_pending_repeat_t repeats[MT_MAX_PENDING_REPEATS];
+
+static bool relay_enabled  = false;  // role is CLIENT
+static bool relay_always   = false;
+static bool relay_opt_text = false;
+
+void mt_set_relay(bool enabled, bool always_repeat, bool optimize_text) {
+    if (!enabled && relay_enabled) memset(repeats, 0, sizeof(repeats));  // drop what we will not send
+    relay_enabled  = enabled;
+    relay_always   = always_repeat;
+    relay_opt_text = optimize_text;
+}
+
+// Upstream's integer map() of SNR onto the contention window exponent.
+static uint8_t cw_size(float snr) {
+    const int32_t snr_min = -20, snr_max = 10;
+    int32_t       s = (int32_t)snr;
+    if (s < snr_min) s = snr_min;
+    if (s > snr_max) s = snr_max;
+    return (uint8_t)(((s - snr_min) * (MT_CW_MAX - MT_CW_MIN)) / (snr_max - snr_min) + MT_CW_MIN);
+}
+
+// The fixed offset every non-router waits, which keeps the client window clear
+// of the one routers transmit in.
+static uint32_t relay_base_delay_ms(void) {
+    return 2u * MT_CW_MAX * MT_SLOT_TIME_MS;
+}
+
+static uint32_t relay_delay_ms(float snr) {
+    uint32_t window = 1u << cw_size(snr);
+    return relay_base_delay_ms() + (esp_random() % window) * MT_SLOT_TIME_MS;
+}
+
+// The last slot of the window: where a packet goes when we intend to relay it
+// anyway but somebody else has already done so.
+static uint32_t relay_late_delay_ms(float snr) {
+    return relay_base_delay_ms() + (1u << cw_size(snr)) * MT_SLOT_TIME_MS;
+}
+
+static mt_pending_repeat_t* find_repeat(uint32_t from, uint32_t id) {
+    for (int i = 0; i < MT_MAX_PENDING_REPEATS; i++) {
+        if (repeats[i].active && repeats[i].from == from && repeats[i].id == id) return &repeats[i];
+    }
+    return NULL;
+}
+
+// Somebody else relayed a packet we are holding. A plain CLIENT drops its copy;
+// with "always repeat" we keep it but move to the back of the queue, so we only
+// ever add coverage that nobody else provided.
+static void relay_heard_dupe(uint32_t from, uint32_t id) {
+    mt_pending_repeat_t* slot = find_repeat(from, id);
+    if (slot == NULL) return;
+
+    if (!relay_always) {
+        slot->active = false;
+        session_log("relay.cancel id=%08lx reason=dupe", (unsigned long)id);
+        return;
+    }
+    if (slot->late) return;
+    slot->late   = true;
+    slot->due_ms = uptime_ms() + relay_late_delay_ms(slot->snr);
+    session_log("relay.late id=%08lx in=%lums", (unsigned long)id,
+                (unsigned long)relay_late_delay_ms(slot->snr));
+}
+
+// Drop a queued relay outright, whatever the mode. Used when a direct message
+// we were about to forward has already been answered: the reply proves it
+// arrived, so carrying it further is pure airtime.
+static void relay_drop(uint32_t from, uint32_t id) {
+    mt_pending_repeat_t* slot = find_repeat(from, id);
+    if (slot == NULL) return;
+    slot->active = false;
+    session_log("relay.cancel id=%08lx reason=answered", (unsigned long)id);
+}
+
+// A second copy with more hops left than the one we are holding. Upstream
+// swaps, because the copy that has travelled less far will reach further.
+static void relay_maybe_upgrade(uint32_t from, uint32_t id, const uint8_t* frame, uint8_t frame_len,
+                                uint8_t hop_limit) {
+    mt_pending_repeat_t* slot = find_repeat(from, id);
+    if (slot == NULL || hop_limit <= slot->hop_limit) return;
+    // No length check: a frame length is a uint8_t and the slot holds a full
+    // header plus the maximum payload, so it cannot overrun. Asserted rather
+    // than assumed, in case either limit ever moves.
+    _Static_assert(sizeof(((mt_pending_repeat_t*)0)->frame) > UINT8_MAX, "relay slot must hold any frame length");
+
+    memcpy(slot->frame, frame, frame_len);
+    slot->length    = frame_len;
+    slot->hop_limit = hop_limit;
+    session_log("relay.upgrade id=%08lx hops=%u", (unsigned long)id, (unsigned)hop_limit);
+}
+
+bool mt_take_due_repeat(uint8_t* out, size_t out_max, uint8_t* out_len) {
+    if (out == NULL || out_len == NULL) return false;
+    uint32_t now = uptime_ms();
+
+    for (int i = 0; i < MT_MAX_PENDING_REPEATS; i++) {
+        if (!repeats[i].active || repeats[i].length > out_max) continue;
+        if ((int32_t)(now - repeats[i].due_ms) < 0) continue;
+
+        memcpy(out, repeats[i].frame, repeats[i].length);
+        *out_len          = repeats[i].length;
+        repeats[i].active = false;
+        return true;
+    }
+    return false;
+}
+
+// What the decode told us about a packet, which is all "optimize for text"
+// needs and more than the plain modes look at.
+typedef struct {
+    bool     decoded;
+    uint32_t portnum;
+} relay_view_t;
+
+// Decide whether a heard packet goes back on the air, and queue it if so.
+//
+// The hard rules are upstream's and hold in every mode: never a packet
+// addressed to us, never one of ours, never one already out of hops, never one
+// we have relayed before, and never the reserved non-LoRa broadcast.
+static void maybe_relay(const mt_packet_t* packet, const uint8_t* frame, uint8_t frame_len, float snr,
+                        const identity_t* identity, const relay_view_t* view) {
+    if (!relay_enabled) return;
+    if (packet->id == 0) return;                            // not a floodable id
+    if (packet->to == identity->node_num) return;           // ours to read, not to carry
+    if (packet->from == identity->node_num) return;         // our own, echoed back
+    if (packet->to == MT_ADDR_BROADCAST_NO_LORA) return;    // explicitly not for the air
+    if (packet->hop_limit == 0) return;                     // out of hops
+    // Routed delivery names one relay; if it is not us, staying quiet is the
+    // whole point of the field.
+    if (packet->next_hop != MT_NEXT_HOP_NONE && packet->next_hop != (uint8_t)identity->node_num) return;
+
+    bool decrement = true;
+    if (relay_opt_text) {
+        // Only what we can read is filtered. A packet we cannot decrypt -- a
+        // direct message, or a channel we do not hold -- has no portnum to
+        // judge, and dropping those would stop us relaying every DM on the
+        // mesh. Upstream's CORE_PORTNUMS_ONLY makes the same choice.
+        if (view->decoded) {
+            if (view->portnum != MT_PORTNUM_TEXT_MESSAGE && view->portnum != MT_PORTNUM_ROUTING) {
+                session_log("relay.skip id=%08lx port=%lu reason=not_text", (unsigned long)packet->id,
+                            (unsigned long)view->portnum);
+                return;
+            }
+            // What we carry travels for free: the hop limit goes out as it came
+            // in, so text reaches past where its sender aimed it.
+            decrement = false;
+        }
+    }
+
+    uint8_t out[MT_HEADER_SIZE + MT_MAX_PAYLOAD_SIZE];
+    uint8_t len = mt_packet_relay(frame, frame_len, (uint8_t)identity->node_num, decrement, out, sizeof(out));
+    if (len == 0) return;
+
+    for (int i = 0; i < MT_MAX_PENDING_REPEATS; i++) {
+        if (repeats[i].active) continue;
+        memcpy(repeats[i].frame, out, len);
+        repeats[i].length    = len;
+        repeats[i].from      = packet->from;
+        repeats[i].id        = packet->id;
+        repeats[i].hop_limit = packet->hop_limit;
+        repeats[i].snr       = snr;
+        repeats[i].late      = false;
+        repeats[i].due_ms    = uptime_ms() + relay_delay_ms(snr);
+        repeats[i].active    = true;
+        session_log("relay.queue id=%08lx hops=%u->%u snr=%d in=%lums", (unsigned long)packet->id,
+                    (unsigned)packet->hop_limit, (unsigned)(decrement ? packet->hop_limit - 1 : packet->hop_limit),
+                    (int)snr, (unsigned long)(repeats[i].due_ms - uptime_ms()));
+        return;
+    }
+    // A backlog this deep means the mesh is already saturated; adding to it
+    // helps nobody.
+    session_log("relay.drop id=%08lx reason=queue_full", (unsigned long)packet->id);
+}
+
 static bool meshtastic_init(void) {
     dedup_reset(&seen);
     memset(pending, 0, sizeof(pending));
     memset(acks, 0, sizeof(acks));
     memset(info_requests, 0, sizeof(info_requests));
+    memset(repeats, 0, sizeof(repeats));
     return true;
 }
 
@@ -454,12 +681,19 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
     // pair is both cheaper and more accurate than fingerprinting bytes.
     uint8_t key[8];
     tx_key(packet.from, packet.id, key);
-    bool duplicate = dedup_check(&seen, key, sizeof(key));
+    bool  duplicate = dedup_check(&seen, key, sizeof(key));
+    float snr       = (float)pkt->stats.snr_pkt_raw / 4.0f;
     if (duplicate) {
         mesh->stats.duplicates++;
         // A repeat of something we sent is not noise: it is the only delivery
         // confirmation available for a broadcast.
         credit_repeat(mesh, packet.from, packet.id);
+
+        // Somebody relayed something we are still holding. Take the better copy
+        // if this one has travelled less far, then either stand down or move to
+        // the back of the queue depending on the mode.
+        relay_maybe_upgrade(packet.from, packet.id, pkt->data, pkt->length, packet.hop_limit);
+        relay_heard_dupe(packet.from, packet.id);
 
         // A retransmission addressed to us still has to be answered. Meshtastic
         // reuses the packet id when it retries, so this is exactly the traffic
@@ -481,48 +715,66 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         node->hops      = mt_hops_taken(&packet);
     }
 
+    // What the decode found, for the relay decision below. A packet we cannot
+    // read stays undecoded here, which is a meaningful answer rather than a
+    // failure -- it is how a direct message for somebody else looks.
+    relay_view_t view  = {0};
+    bool         shown = false;
+
     // End-to-end first. It is tried before the channels because a PKI packet
     // carries a zero channel hash, which an unencrypted channel could otherwise
     // match by coincidence and then fail to parse.
     mt_data_t pki_data;
     if (try_pki(&packet, mesh, identity, node, &pki_data)) {
-        bool shown = deliver(&pki_data, &packet, mesh, node, pkt, (uint8_t)mesh->input_channel, true, duplicate, identity);
-        detail(mesh);
-        return shown;
+        shown = deliver(&pki_data, &packet, mesh, node, pkt, (uint8_t)mesh->input_channel, true, duplicate, identity);
+        view.decoded = true;
+        view.portnum = pki_data.portnum;
+    } else {
+        for (int i = 0; i < mesh->channel_count; i++) {
+            const channel_t* ch = &mesh->channels[i];
+            if (!ch->ready || packet.channel_hash != ch->hash) continue;
+
+            mt_key_t key = {.length = ch->key_len};
+            memcpy(key.bytes, ch->key, ch->key_len);
+
+            // Decrypting mutates the payload, so work on a copy: a hash
+            // collision between two configured channels must not destroy the
+            // ciphertext for the next candidate.
+            mt_packet_t attempt = packet;
+            if (!mt_decrypt(&key, attempt.from, attempt.id, attempt.payload, attempt.payload_length)) continue;
+
+            // CTR cannot report a wrong key, so the protobuf parse is the real
+            // gate.
+            mt_data_t data;
+            if (!mt_data_parse(attempt.payload, attempt.payload_length, &data)) continue;
+
+            // NodeInfo is what turns a bare node number into a name. Handled
+            // before the text-message path because it is not a message and must
+            // not be shown as one.
+            shown = deliver(&data, &attempt, mesh, node, pkt, i, attempt.to == identity->node_num, duplicate, identity);
+            view.decoded = true;
+            view.portnum = data.portnum;
+
+            // An acknowledgement or reply for somebody else's direct message
+            // proves it arrived, so anything we were holding to forward is now
+            // pure airtime. Upstream cancels here too.
+            if (data.has_request_id && data.request_id != 0 && attempt.to != identity->node_num &&
+                attempt.to != MT_BROADCAST_ADDR) {
+                relay_drop(attempt.to, data.request_id);
+            }
+            break;
+        }
+        if (!view.decoded) mesh->stats.not_our_channel++;
     }
 
-    for (int i = 0; i < mesh->channel_count; i++) {
-        const channel_t* ch = &mesh->channels[i];
-        if (!ch->ready || packet.channel_hash != ch->hash) continue;
+    // Last, and only for traffic we have not seen before: a duplicate has
+    // already been relayed once, and relaying it again is what a mesh does to
+    // itself when nobody counts.
+    if (!duplicate) maybe_relay(&packet, pkt->data, pkt->length, snr, identity, &view);
 
-        mt_key_t key = {.length = ch->key_len};
-        memcpy(key.bytes, ch->key, ch->key_len);
-
-        // Decrypting mutates the payload, so work on a copy: a hash collision
-        // between two configured channels must not destroy the ciphertext for
-        // the next candidate.
-        mt_packet_t attempt = packet;
-        if (!mt_decrypt(&key, attempt.from, attempt.id, attempt.payload, attempt.payload_length)) continue;
-
-        // CTR cannot report a wrong key, so the protobuf parse is the real gate.
-        mt_data_t data;
-        if (!mt_data_parse(attempt.payload, attempt.payload_length, &data)) continue;
-
-        // NodeInfo is what turns a bare node number into a name. Handled before
-        // the text-message path because it is not a message and must not be
-        // shown as one.
-        bool shown = deliver(&data, &attempt, mesh, node, pkt, i, attempt.to == identity->node_num, duplicate, identity);
-        detail(mesh);
-        return shown;
-    }
-
-    mesh->stats.not_our_channel++;
     detail(mesh);
-    return false;
+    return shown;
 }
-
-#define MT_BROADCAST_ADDR 0xFFFFFFFFu
-#define MT_DEFAULT_HOPS   3
 
 // The hop limit in force. Pushed in from the configuration rather than read
 // from the model, so the stack stays a consumer of settings rather than a

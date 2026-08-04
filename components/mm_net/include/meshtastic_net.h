@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "app_model.h"
@@ -29,3 +30,22 @@ void mt_set_hop_limit(uint8_t hops);
 
 // What we advertise ourselves as in NodeInfo.
 void mt_set_role(uint8_t role);
+
+// Whether, and how, we forward other people's packets.
+//
+//   enabled        the role is CLIENT. CLIENT_MUTE forwards nothing, which is
+//                  what it advertises and what it should do.
+//   always_repeat  relay even when another node already did, going last so we
+//                  only ever add coverage nobody else provided.
+//   optimize_text  relay only text and acknowledgements, and let them keep
+//                  their hop limit. Packets we cannot decrypt are relayed
+//                  normally, since they have no readable type to judge.
+//
+// Turning relaying off discards anything already queued: those frames were
+// going to be sent on a promise that no longer holds.
+void mt_set_relay(bool enabled, bool always_repeat, bool optimize_text);
+
+// Hand over a frame whose backoff has elapsed, if there is one. Same contract
+// as the MeshCore side: the event loop owns the transmitter, this owns the
+// timing.
+bool mt_take_due_repeat(uint8_t* out, size_t out_max, uint8_t* out_len);

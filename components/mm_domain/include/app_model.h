@@ -355,11 +355,12 @@ typedef enum {
     RADIO_ERROR,
 } radio_state_t;
 
-// What Meshtastic advertises us as. CLIENT_MUTE is the default because it is
-// the truthful one: it says we do not relay, and we do not.
+// What Meshtastic advertises us as, and -- since CLIENT actually relays now --
+// what we do. CLIENT_MUTE stays the default: relaying costs battery and airtime,
+// and a handheld that spends the afternoon in a pocket is a poor repeater.
 typedef enum {
-    MT_ROLE_CLIENT      = 0,  // the protobuf default
-    MT_ROLE_CLIENT_MUTE = 1,
+    MT_ROLE_CLIENT      = 0,  // the protobuf default; relays for others
+    MT_ROLE_CLIENT_MUTE = 1,  // hears everything, forwards nothing
 } mt_role_t;
 
 #define SET_HOPS_MAX_STORED  5  // what may be made permanent
@@ -384,6 +385,17 @@ typedef struct {
     uint8_t mt_default_hops;
     uint8_t mt_role;  // mt_role_t
 
+    // Both only mean anything at MT_ROLE_CLIENT, and both are off by default,
+    // which is where a plain Meshtastic CLIENT sits.
+    //
+    // Repeat even when another node already did, going last so we only add
+    // coverage nobody else provided. This is upstream's ROUTER_LATE behaviour
+    // without the router's early slot or its advertised role.
+    bool mt_always_repeat;
+    // Look inside before relaying: carry text and acknowledgements, drop the
+    // rest, and let what we carry keep its hop limit.
+    bool mt_optimize_text;
+
     bool mc_repeater;
 } settings_t;
 
@@ -395,6 +407,8 @@ typedef enum {
     SET_FIELD_DISPLAY_OFF,
     SET_FIELD_MT_HOPS,
     SET_FIELD_MT_ROLE,
+    SET_FIELD_MT_ALWAYS_REPEAT,
+    SET_FIELD_MT_OPTIMIZE,
     SET_FIELD_MC_REPEATER,
     SET_FIELD_COUNT,
 } setting_field_t;
@@ -403,7 +417,12 @@ typedef enum {
 
 // Fill `out` with the visible fields in order and return how many. Shared ones
 // first, then whichever network's own settings apply.
-int settings_visible_fields(mesh_id_t active, setting_field_t* out, int max);
+//
+// Not a fixed list: the two Meshtastic relay settings appear only at
+// MT_ROLE_CLIENT, because at CLIENT_MUTE they would be controls for something
+// that cannot happen. Hence the settings pointer -- visibility depends on the
+// current values, not only on which network is up.
+int settings_visible_fields(mesh_id_t active, const settings_t* settings, setting_field_t* out, int max);
 
 typedef struct {
     mesh_state_t mesh[MESH_COUNT];
@@ -445,10 +464,12 @@ typedef struct {
     uint32_t last_advert_ms;  // manual announce cooldown
     char     node_short_edit[NODE_SHORT_MAX + 1];  // the short name being typed
 
-    // Off-grid repeat, shown on the status bar. The count matters more than it
-    // looks: a node that has been repeating all afternoon and relayed nothing is
-    // spending its battery on an empty room, and there is no other way to tell.
-    uint32_t repeat_count;
+    // Relaying, shown on the status bar. Per network, because the two are
+    // separate decisions with separate settings and a shared total would say
+    // nothing about either. The count matters more than it looks: a node that
+    // has been repeating all afternoon and relayed nothing is spending its
+    // battery on an empty room, and there is no other way to tell.
+    uint32_t repeat_count[MESH_COUNT];
     bool     repeat_busy;  // briefly true after each relay, so the badge blinks
 
     radio_state_t radio;
