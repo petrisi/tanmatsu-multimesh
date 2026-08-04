@@ -16,7 +16,11 @@
 #define MAX_CHANNELS  6
 #define MAX_MESSAGES  64
 #define COMPOSER_MAX  256
-#define SENDER_MAX    16
+// Long enough for a full MeshCore name plus its terminator. MeshCore allows 32
+// bytes, and bytes are what matters: "Härmälänranta" is thirteen characters but
+// sixteen bytes, and a limit set by character count silently rejects Finnish
+// names that a Finnish user considers unremarkable.
+#define SENDER_MAX    33
 #define TEXT_MAX      192
 #define HISTORY_MAX   12
 

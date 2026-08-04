@@ -260,6 +260,23 @@ static int utf8_adv(unsigned char c) {
     return (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
 }
 
+// Copy at most `cells` characters, never a fraction of one.
+//
+// The columns here are measured in character cells, but printf precision counts
+// bytes, so "%.4s" on a name like "Häämä" keeps four bytes and leaves a dangling
+// lead byte. That is not a shortened name on screen, it is a broken glyph -- and
+// it only shows up on exactly the names this app exists to carry.
+static void utf8_clip(char* dst, size_t dst_size, const char* src, int cells) {
+    size_t at = 0;
+    for (int n = 0; n < cells && src[at]; n++) {
+        int width = utf8_adv((unsigned char)src[at]);
+        if (at + width >= dst_size) break;
+        memcpy(&dst[at], &src[at], width);
+        at += width;
+    }
+    dst[at] = '\0';
+}
+
 #define msg_at(mesh, logical) model_message_at((mesh), (logical))
 
 static void wrap_message(int msg_index, const char* text, int room) {
@@ -572,18 +589,19 @@ static void draw_messages(const app_model_t* model) {
             // travelled on is an implementation detail, who it was with is not.
             // The arrow gives the direction, so the sender column can stay empty
             // rather than repeating the same name on every row.
-            char chan[CH_DISPLAY_MAX + 2];
+            char chan[SENDER_MAX + 2];
             if (msg->dm) {
-                snprintf(chan, sizeof(chan), "%c%.*s", msg->outgoing ? '>' : '<', chan_cells(model) - 1, msg->peer);
+                chan[0] = msg->outgoing ? '>' : '<';
+                utf8_clip(chan + 1, sizeof(chan) - 1, msg->peer, chan_cells(model) - 1);
                 pax_draw_text(&fb, COL_DM, FONT, FONT_SIZE, x_chan(), y, chan);
             } else {
-                snprintf(chan, sizeof(chan), "%.*s", chan_cells(model), ch->display);
+                utf8_clip(chan, sizeof(chan), ch->display, chan_cells(model));
                 pax_draw_text(&fb, ch->color, FONT, FONT_SIZE, x_chan(), y, chan);
             }
 
             if (!msg->dm) {
-                char who[COL_FROM_CELLS + 1];
-                snprintf(who, sizeof(who), "%.*s", COL_FROM_CELLS, msg->sender);
+                char who[SENDER_MAX];
+                utf8_clip(who, sizeof(who), msg->sender, COL_FROM_CELLS);
                 // Colour alone distinguishes a NodeInfo short name from a raw
                 // node id -- no prefix, so the column is the same width either
                 // way.

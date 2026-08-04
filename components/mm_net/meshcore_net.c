@@ -425,8 +425,17 @@ static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t
         char        who[SENDER_MAX];
         snprintf(who, sizeof(who), "?");
         const char* colon = strstr(decoded.text, ": ");
-        if (colon && (size_t)(colon - decoded.text) < sizeof(who)) {
+        if (colon) {
             size_t n = (size_t)(colon - decoded.text);
+            // An over-long prefix is truncated rather than rejected. Refusing the
+            // split leaves the name sitting in the message body with a "?" beside
+            // it, which is worse than a shortened name -- and the limit is in
+            // bytes, so it is the multi-byte names that hit it first.
+            if (n >= sizeof(who)) n = sizeof(who) - 1;
+            // Never cut a character in half: a trailing partial sequence is not
+            // rendered as anything, it is rendered as damage.
+            while (n > 0 && ((unsigned char)decoded.text[n] & 0xC0) == 0x80) n--;
+
             memcpy(who, decoded.text, n);
             who[n] = '\0';
             body   = colon + 2;
