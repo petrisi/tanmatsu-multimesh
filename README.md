@@ -216,6 +216,31 @@ hint bar is always the authority on what they do.
 
 Typing always goes to the composer — there is no edit mode.
 
+### Finnish letters
+
+The Tanmatsu keyboard is US QWERTY. On a Finnish one the three letters this app
+most needs sit exactly where US punctuation is — Å right of P, Ö and Ä right of
+L — so those keys are remapped and the punctuation moves to a modifier layer:
+
+| Key | Alone | Shift | **Fn** or **Ctrl** | Fn/Ctrl + Shift |
+|---|---|---|---|---|
+| `[` | å | Å | `[` | `{` |
+| `;` | ö | Ö | `;` | `:` |
+| `'` | ä | Ä | `'` | `"` |
+
+Not AltGr: the BSP substitutes its own third-level table before the event
+reaches the app, so AltGr+`;` never arrives as a semicolon — it arrives as a
+combining ogonek. Fn and Ctrl leave the character alone and only set a modifier
+bit. The BSP's own AltGr+Q/W/P still produce ä å ö and are left working.
+
+This is app-local. The keycaps and every other app still say US; changing that
+would mean patching the BSP.
+
+The spacebar is three switches under one bar which the BSP ORs together, and it
+emits a space on every rising edge of that OR — so a single press produces two
+or three as the bar rocks and the contacts make out of step. Spaces arriving
+within 120 ms of each other are treated as the same press.
+
 An outgoing message occupies the timestamp column with its progress until it
 settles. Neither network acknowledges a broadcast, so the delivery signal is
 hearing a repeater flood it back: MeshCore shows how many repeats were counted,

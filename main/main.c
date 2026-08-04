@@ -255,6 +255,70 @@ static void composer_set(const char* text) {
     model.composer_cursor = model.composer_len;
 }
 
+// --- keyboard layout -----------------------------------------------------
+//
+// The Tanmatsu keyboard is US QWERTY. On a Finnish one the three letters this
+// app most needs sit exactly where US punctuation is -- Å right of P, Ö and Ä
+// right of L -- so those keys are remapped and the punctuation moves to a
+// modifier layer.
+//
+//   [ {   ->  a-ring, lower and upper
+//   ; :   ->  o-diaeresis
+//   ' "   ->  a-diaeresis
+//
+// Hold Fn or Ctrl to get the printed character back; shift still selects the
+// case, so Fn+shift+; is a colon.
+//
+// AltGr deliberately does not do this. The BSP substitutes its own third-level
+// table before the event reaches us, so AltGr+';' never arrives as ';' -- it
+// arrives as a combining ogonek, and recovering the semicolon would mean
+// undoing the BSP's table from the outside. Fn and Ctrl leave the character
+// alone and only set a modifier bit, which is exactly what is needed.
+//
+// This is app-local: the keycaps and every other app still say US. The BSP's own
+// AltGr+Q/W/P are left working as a fallback rather than broken.
+static const char* finnish_layout(const char* utf8, uint32_t modifiers) {
+    // Asking for the printed character: pass it through untouched. Shift has
+    // already chosen between ';' and ':' by the time we see it.
+    if (modifiers & (BSP_INPUT_MODIFIER_FUNCTION | BSP_INPUT_MODIFIER_CTRL)) return utf8;
+
+    // Single-byte comparison is enough: everything remapped here is ASCII, and
+    // anything already multi-byte cannot be one of these keys.
+    if (utf8[1] != '\0') return utf8;
+
+    switch (utf8[0]) {
+        case '[': return "å";  // a-ring
+        case '{': return "Å";
+        case ';': return "ö";  // o-diaeresis
+        case ':': return "Ö";
+        case '\'': return "ä";  // a-diaeresis
+        case '"': return "Ä";
+        default: return utf8;
+    }
+}
+
+// The spacebar is three switches under one bar, OR'd together by the BSP, and a
+// space is emitted on every rising edge of that OR. As the bar rocks, contacts
+// make and break out of step and each transition produces another space -- which
+// is why only space does this and why key repeat is not involved.
+//
+// Mechanical bounce settles in tens of milliseconds. Anything sooner than this
+// after a space is the same press arriving again, not a second one.
+#define SPACE_BOUNCE_MS 120
+
+static uint32_t last_space_ms;
+
+static bool space_is_bounce(const char* utf8) {
+    if (utf8[0] != ' ' || utf8[1] != '\0') return false;
+
+    uint32_t now = now_ms();
+    // The first space after boot has nothing to compare against.
+    if (last_space_ms != 0 && now - last_space_ms < SPACE_BOUNCE_MS) return true;
+
+    last_space_ms = now;
+    return false;
+}
+
 static void composer_append(const char* utf8) {
     int add = (int)strlen(utf8);
     if (add == 0) return;
@@ -1368,20 +1432,19 @@ void app_main(void) {
                     break;
 
                 case INPUT_EVENT_TYPE_KEYBOARD:
-                    // utf8 carries the AltGr layer, which is where ä å ö live.
-                    if (event.args_keyboard.utf8[0] && (unsigned char)event.args_keyboard.utf8[0] >= 0x20) {
+                    if (event.args_keyboard.utf8[0] && (unsigned char)event.args_keyboard.utf8[0] >= 0x20 &&
+                        !space_is_bounce(event.args_keyboard.utf8)) {
+                        // Applied once, here, so every text field gets the same
+                        // layout: the composer, the channel editor and the
+                        // identity fields all need Finnish letters.
+                        const char* text = finnish_layout(event.args_keyboard.utf8, event.args_keyboard.modifiers);
+
                         int max = 0;
                         switch (model.overlay) {
-                            case OVERLAY_EDITOR:
-                                field_append(editor_focused_field(&max), max, event.args_keyboard.utf8);
-                                break;
-                            case OVERLAY_IDENTITY:
-                                field_append(identity_focused_field(&max), max, event.args_keyboard.utf8);
-                                break;
+                            case OVERLAY_EDITOR: field_append(editor_focused_field(&max), max, text); break;
+                            case OVERLAY_IDENTITY: field_append(identity_focused_field(&max), max, text); break;
                             case OVERLAY_NONE:
-                                if (model_active(&model)->selected_seq < 0) {
-                                    composer_append(event.args_keyboard.utf8);
-                                }
+                                if (model_active(&model)->selected_seq < 0) composer_append(text);
                                 break;
                             default: break;
                         }
