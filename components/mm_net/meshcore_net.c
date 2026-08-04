@@ -16,6 +16,23 @@
 #include "meshcore_net.h"
 #include "meshcore_wire.h"
 #include "radio_cfg.h"
+#include "session_log.h"
+
+// A path as "0cbd>8dea", for the log. Static buffer: the log is single-threaded
+// through the event loop and the result is consumed immediately.
+static const char* path_text(uint8_t ctrl, const uint8_t* path) {
+    static char buf[3 * MC_MAX_PATH_SIZE + 8];
+    uint8_t     width = MC_PATH_HASH_SIZE(ctrl);
+    uint8_t     bytes = MC_PATH_BYTES(ctrl);
+    int         n     = 0;
+
+    if (bytes == 0) return "-";
+    for (int i = 0; i + width <= bytes && n < (int)sizeof(buf) - 8; i += width) {
+        if (i) n += snprintf(buf + n, sizeof(buf) - n, ">");
+        for (int b = 0; b < width; b++) n += snprintf(buf + n, sizeof(buf) - n, "%02x", path[i + b]);
+    }
+    return buf;
+}
 
 static const char TAG[] = "net_mc";
 
@@ -317,10 +334,20 @@ static bool handle_datagram(const mc_packet_t* packet, mesh_state_t* mesh, const
             // Arriving by flood means the sender does not know the way here.
             // Answering with the route it took teaches them, and costs one
             // packet rather than the several a repeated flood would.
-            if (packet->route == MC_ROUTE_FLOOD || packet->route == MC_ROUTE_TRANSPORT_FLOOD) {
+            bool arrived_flooded = packet->route == MC_ROUTE_FLOOD || packet->route == MC_ROUTE_TRANSPORT_FLOOD;
+            session_log("dm.rx from=%02x%02x attempt=%u flooded=%u hops=%u ack=%02x%02x%02x%02x", node->key[0],
+                        node->key[1], (unsigned)decoded.attempt, arrived_flooded ? 1u : 0u,
+                        (unsigned)packet->hop_count, hash[0], hash[1], hash[2], hash[3]);
+
+            if (arrived_flooded) {
                 queue_path_return(node, packet, identity, hash, extended);
+                session_log("path.tx to=%02x%02x hops=%u path=%s", node->key[0], node->key[1],
+                            (unsigned)packet->hop_count,
+                            path_text(MC_PATH_CTRL(packet->hop_count, packet->bytes_per_hop), packet->path));
             } else {
                 queue_ack(node, hash, extended);
+                session_log("ack.tx to=%02x%02x direct=%u", node->key[0], node->key[1],
+                            node->has_out_path ? 1u : 0u);
             }
         }
 
@@ -369,8 +396,24 @@ static bool credit_ack(mesh_state_t* mesh, const uint8_t hash[MC_ACK_HASH_SIZE])
 
         msg->acked = true;
         msg->tx    = TX_CONFIRMED;
+        session_log("ack.match hash=%08lx seq=%lu attempt=%u direct=%u", (unsigned long)value,
+                    (unsigned long)msg->seq, (unsigned)msg->dm_attempt, msg->dm_direct ? 1u : 0u);
         ESP_LOGI(TAG, "dm to %s acknowledged", msg->peer);
         return true;
+    }
+
+    // Nothing matched. Log what we were waiting for, because an acknowledgement
+    // that arrives and is not credited looks identical on screen to one that
+    // never arrived, and the two have completely different causes.
+    if (session_log_active()) {
+        char waiting[160];
+        int  n = 0;
+        for (int i = 0; i < mesh->count && n < (int)sizeof(waiting) - 12; i++) {
+            const message_t* msg = model_message_at(mesh, i);
+            if (msg == NULL || !msg->used || !msg->outgoing || !msg->dm || msg->acked) continue;
+            n += snprintf(waiting + n, sizeof(waiting) - n, "%s%08lx", n ? "," : "", (unsigned long)msg->expected_ack);
+        }
+        session_log("ack.nomatch hash=%08lx waiting=%s", (unsigned long)value, n ? waiting : "-");
     }
     return false;
 }
@@ -385,21 +428,42 @@ static bool handle_path_return(const mc_packet_t* packet, mesh_state_t* mesh, co
 
     mc_datagram_t datagram;
     if (!mc_datagram_parse(packet->payload, packet->payload_length, &datagram)) return false;
-    if (datagram.dest_hash != identity->public_key[0]) return false;
+    if (datagram.dest_hash != identity->public_key[0]) {
+        session_log("path.skip reason=notus dest=%02x us=%02x", datagram.dest_hash, identity->public_key[0]);
+        return false;
+    }
 
+    int candidates = 0;
     for (int i = 0; i < MAX_NODES; i++) {
         node_t* node = &mesh->nodes[i];
-        if (!node->used || !node->has_secret || node->key[0] != datagram.src_hash) continue;
+        if (!node->used || node->key[0] != datagram.src_hash) continue;
+        candidates++;
+        // A contact we have never agreed a key with cannot be the sender as far
+        // as we are concerned, and saying so distinguishes "no key yet" from
+        // "the wrong key" when a path return goes unread.
+        if (!node->has_secret) {
+            session_log("path.skip reason=nosecret src=%02x", datagram.src_hash);
+            continue;
+        }
 
         uint8_t plain[MC_MAX_PAYLOAD_SIZE];
         size_t  plain_len = 0;
         if (!mc_datagram_decrypt(node->shared_secret, datagram.mac, datagram.cipher, datagram.cipher_length, plain,
                                  sizeof(plain), &plain_len)) {
+            session_log("path.skip reason=mac src=%02x", datagram.src_hash);
             continue;
         }
 
         mc_path_msg_t returned;
-        if (!mc_path_parse(plain, plain_len, &returned)) return false;
+        if (!mc_path_parse(plain, plain_len, &returned)) {
+            session_log("path.bad reason=parse len=%u", (unsigned)plain_len);
+            return false;
+        }
+
+        session_log("path.rx from=%s hops=%u width=%u path=%s extra=%u len=%u",
+                    node->long_name[0] ? node->long_name : "?", (unsigned)MC_PATH_COUNT(returned.path_ctrl),
+                    (unsigned)MC_PATH_HASH_SIZE(returned.path_ctrl), path_text(returned.path_ctrl, returned.path),
+                    (unsigned)returned.extra_type, (unsigned)returned.extra_len);
 
         // Replace whatever we had. A node handing back a route is describing the
         // one that just worked, and an older path is not evidence of anything.
@@ -418,6 +482,10 @@ static bool handle_path_return(const mc_packet_t* packet, mesh_state_t* mesh, co
         }
         return true;
     }
+
+    // Arrived for us but matched nobody: the sender is unknown, or the one-byte
+    // hash pointed at contacts whose keys all failed.
+    session_log("path.drop src=%02x candidates=%d", datagram.src_hash, candidates);
     return false;
 }
 
@@ -432,11 +500,24 @@ static bool handle_ack(const mc_packet_t* packet, mesh_state_t* mesh) {
 static bool meshcore_handle(const lora_protocol_lora_packet_t* pkt, mesh_state_t* mesh, const identity_t* identity) {
     mesh->stats.packets_total++;
 
+    if (session_log_active()) {
+        char extra[48];
+        snprintf(extra, sizeof(extra), "rssi=%d snr=%d", -(int)pkt->stats.rssi_pkt_raw / 2, pkt->stats.snr_pkt_raw);
+        session_log_frame("rx", "mc", extra, pkt->data, pkt->length);
+    }
+
     mc_packet_t packet;
     if (!mc_packet_parse(pkt->data, pkt->length, &packet)) {
         mesh->stats.packets_bad++;
+        session_log("rx.bad net=mc reason=parse");
         return false;
     }
+
+    session_log("rx.mc type=%s route=%u hops=%u width=%u path=%s paylen=%u",
+                mc_payload_type_name(packet.type), (unsigned)packet.route, (unsigned)packet.hop_count,
+                (unsigned)packet.bytes_per_hop, path_text(MC_PATH_CTRL(packet.hop_count, packet.bytes_per_hop),
+                                                          packet.path),
+                (unsigned)packet.payload_length);
 
     // MeshCore floods, and the same message arrives once directly and again via
     // every repeater. There is no packet id to key on, but the header and
@@ -659,6 +740,12 @@ uint8_t mc_encode_dm_attempt(const identity_t* identity, const node_t* peer, con
         msg->dm_direct  = direct;
         memcpy(msg->dm_peer_key, peer->key, NODE_KEY_LEN);
         track_transmission(payload, payload_len, msg->seq);
+
+        session_log("dm.tx seq=%lu to=%02x%02x attempt=%u direct=%u hops=%u path=%s exp=%08lx",
+                    (unsigned long)msg->seq, peer->key[0], peer->key[1], (unsigned)attempt, direct ? 1u : 0u,
+                    direct ? (unsigned)MC_PATH_COUNT(peer->out_path_ctrl) : 0u,
+                    direct ? path_text(peer->out_path_ctrl, peer->out_path) : "-",
+                    (unsigned long)msg->expected_ack);
     }
     return len;
 }

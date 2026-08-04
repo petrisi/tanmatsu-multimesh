@@ -7,5 +7,5 @@
 idf_component_register(
     SRCS "crypto_jobs.c" "meshcore_net.c" "meshtastic_net.c"
     INCLUDE_DIRS "include"
-    REQUIRES mm_proto mm_crypto mm_domain mm_radio vendor tanmatsu-lora
+    REQUIRES mm_proto mm_crypto mm_domain mm_radio mm_log vendor tanmatsu-lora
 )

@@ -3,6 +3,6 @@
 idf_component_register(
     SRCS "ui.c" "font_mono_fi.c" "leds.c"
     INCLUDE_DIRS "include"
-    REQUIRES mm_domain mm_proto pax-gfx badge-bsp
+    REQUIRES mm_domain mm_log mm_proto pax-gfx badge-bsp
     PRIV_REQUIRES esp_lcd
 )

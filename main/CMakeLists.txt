@@ -6,6 +6,7 @@ idf_component_register(
         mm_crypto
         mm_proto
         mm_domain
+        mm_log
         mm_net
         mm_radio
         mm_ui

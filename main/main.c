@@ -31,6 +31,7 @@
 #include "nodestore.h"
 #include "nvs_flash.h"
 #include "radio.h"
+#include "session_log.h"
 #include "settings.h"
 #include "ui.h"
 #include "x25519.h"
@@ -82,6 +83,11 @@ static void tx_worker(void* arg) {
     while (xQueueReceive(tx_requests, &request, portMAX_DELAY) == pdTRUE) {
         tx_event_t event = {.mesh = request.mesh, .seq = request.seq, .kind = TX_EVENT_SENDING};
         xQueueSend(tx_events, &event, 0);
+
+        // Every frame that goes on air, verbatim. Logged here rather than at the
+        // encoders so acknowledgements and adverts are covered too, and so what
+        // is recorded is what was actually transmitted.
+        session_log_frame("tx", request.mesh == MESH_MC ? "mc" : "mt", NULL, request.frame, request.length);
 
         bool ok    = radio_send(request.frame, request.length);
         event.kind = ok ? TX_EVENT_SENT : TX_EVENT_FAILED;
@@ -232,11 +238,17 @@ static bool retry_direct_message(mesh_state_t* mesh, message_t* msg) {
         peer->has_out_path  = false;
         peer->out_path_ctrl = 0;
         nodestore_mark_dirty(MESH_MC);
+        session_log("route.drop seq=%lu peer=%02x%02x after=%u attempts", (unsigned long)msg->seq, peer->key[0],
+                    peer->key[1], (unsigned)(msg->dm_attempt + 1));
         ESP_LOGW(TAG, "route to %s stopped working; flooding again", msg->peer);
         toast("route to %s lost - flooding", msg->peer);
     } else if (exhausted) {
+        session_log("dm.giveup seq=%lu attempts=%u", (unsigned long)msg->seq, (unsigned)(msg->dm_attempt + 1));
         return false;  // already flooding and still nothing; give up
     }
+
+    session_log("dm.retry seq=%lu attempt=%u direct=%u", (unsigned long)msg->seq, (unsigned)(msg->dm_attempt + 1),
+                peer->has_out_path ? 1u : 0u);
 
     tx_request_t request = {.mesh = MESH_MC, .seq = msg->seq};
     request.length       = mc_encode_dm_attempt(&model.identity, peer, msg->text, (uint8_t)(msg->dm_attempt + 1),
@@ -1280,8 +1292,24 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
 
         case BSP_INPUT_NAVIGATION_KEY_F2: switch_mesh(); break;
         case BSP_INPUT_NAVIGATION_KEY_F3:
-            model.show_meta = !model.show_meta;
-            settings_save_prefs(&model);
+            // fn turns this into the diagnostic recorder. A modifier rather than
+            // a menu entry on purpose: it is for reproducing a fault on request,
+            // not something to switch on by wandering into it.
+            if (fn) {
+                if (session_log_toggle()) {
+                    toast("recording session");
+                } else {
+                    uint32_t lost = session_log_dropped();
+                    if (lost) {
+                        toast("stopped - %lu lines lost", (unsigned long)lost);
+                    } else {
+                        toast("stopped - %lu bytes", (unsigned long)session_log_bytes());
+                    }
+                }
+            } else {
+                model.show_meta = !model.show_meta;
+                settings_save_prefs(&model);
+            }
             break;
         case BSP_INPUT_NAVIGATION_KEY_F4:
             model.overlay    = OVERLAY_NODES;
@@ -1445,6 +1473,8 @@ void app_main(void) {
         ui_boot_line("ed25519 self-test FAILED");
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
+
+    session_log_init();
 
     if (nodestore_init()) {
         nodestore_load(&model);

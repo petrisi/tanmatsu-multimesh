@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+#include "session_log.h"
 #include "ui.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -485,6 +486,13 @@ static void draw_status(const app_model_t* model) {
 
     x -= 34;
     draw_battery(x, 3, model->battery_pct, model->charging);
+
+    // Recording is stated plainly. A diagnostic that runs unnoticed is one that
+    // fills flash for a week and is never collected.
+    if (session_log_active()) {
+        x -= 6 + 4 * CHAR_W;
+        pax_draw_text(&fb, COL_BAD, FONT, FONT_SIZE, x, 4, "REC");
+    }
 
     x -= 6 + 3 * CHAR_W;
     const char* radio_label = model->radio == RADIO_TX ? "TX" : model->radio == RADIO_ERROR ? "!!" : "RX";
