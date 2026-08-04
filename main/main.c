@@ -25,7 +25,6 @@
 #include "freertos/task.h"
 #include "leds.h"
 #include "mesh_net.h"
-#include "meshcore_net.h"
 #include "meshtastic_crypto.h"
 #include "meshtastic_wire.h"
 #include "nodestore.h"
@@ -138,15 +137,28 @@ static bool drain_crypto(void) {
     return changed;
 }
 
-// Put any acknowledgement the MeshCore receive path built onto the transmit
-// queue. Built there because only that stack knows what proves delivery; queued
+// Put any acknowledgement a receive path built onto the transmit queue. Built
+// there because only the stack knows what proves delivery on its network; queued
 // here because only this loop owns the transmitter.
+//
+// Only the active network's, because there is one radio and it is tuned to one
+// network. An acknowledgement for the other would go out on the wrong frequency
+// -- interference rather than delivery. The inactive network's queue is drained
+// and discarded instead: it can only hold something queued moments before a
+// switch, and an acknowledgement that arrives after a detour through another
+// band is too late to stop the sender retrying anyway.
 static void forward_acks(void) {
-    tx_request_t request = {.mesh = MESH_MC, .seq = UINT32_MAX};
-    while (mc_take_pending_ack(request.frame, sizeof(request.frame), &request.length)) {
-        if (xQueueSend(tx_requests, &request, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "transmit queue full; acknowledgement dropped");
-            return;
+    for (int i = 0; i < MESH_COUNT; i++) {
+        if (nets[i]->take_pending_ack == NULL) continue;
+
+        tx_request_t request = {.mesh = (mesh_id_t)i, .seq = UINT32_MAX};
+        while (nets[i]->take_pending_ack(request.frame, sizeof(request.frame), &request.length)) {
+            if ((mesh_id_t)i != model.active) continue;  // drained, not sent
+
+            if (xQueueSend(tx_requests, &request, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "transmit queue full; acknowledgement dropped");
+                return;
+            }
         }
     }
 }

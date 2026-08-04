@@ -67,6 +67,16 @@ typedef struct mesh_net_s {
     uint8_t (*encode_dm)(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, const char* text,
                          message_t* msg, uint8_t* out, size_t out_max);
 
+    // Collect an acknowledgement the receive path built, if any.
+    //
+    // Reading a direct message obliges us to answer it, and on both networks the
+    // answer proves we decrypted the message rather than merely heard the frame.
+    // But receive runs on the event loop and transmitting blocks, so the frame is
+    // parked here for the loop to pick up and put on its own transmit queue.
+    //
+    // False when there is nothing waiting.
+    bool (*take_pending_ack)(uint8_t* out, size_t out_max, uint8_t* out_len);
+
     // Build the frame that announces us to the network. Both networks have the
     // concept and neither builds it the same way -- Meshtastic sends an
     // unsigned NodeInfo on a channel, MeshCore an Ed25519-signed advert that

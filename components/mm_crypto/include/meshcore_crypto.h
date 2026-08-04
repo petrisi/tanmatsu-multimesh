@@ -82,9 +82,16 @@ typedef struct {
     uint8_t  text_type;   // 0 is a plain message; others are CLI and signed forms
     uint8_t  attempt;     // resend counter, low two bits of the flags byte
     char     text[MC_MAX_PAYLOAD_SIZE];
-    // The bytes an acknowledgement is computed over: the unpadded plaintext.
-    // Kept because the padding is not part of it and cannot be recovered later.
-    uint8_t  signed_len;
+
+    // The decrypted bytes exactly as they arrived, padding included. The
+    // acknowledgement is hashed over a prefix of these rather than over a
+    // re-framing of the fields above: reconstructing the plaintext would have to
+    // reproduce every choice the sender made, and any difference produces an
+    // acknowledgement the sender does not recognise -- which looks like a lost
+    // message rather than a hashing bug.
+    uint8_t plain[MC_MAX_PAYLOAD_SIZE];
+    uint8_t plain_len;   // padded length, a multiple of the cipher block
+    uint8_t signed_len;  // 5 + strlen(text): the prefix the acknowledgement covers
 } mc_dm_msg_t;
 
 // Frame a direct message: timestamp[4] | flags[1] | text[...] NUL-terminated,
@@ -109,3 +116,13 @@ bool mc_dm_decrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t mac
 // merely heard the frame.
 bool mc_dm_ack_hash(uint8_t out[4], const uint8_t* plain, size_t unpadded_len,
                     const uint8_t sender_public_key[MC_PUB_KEY_SIZE]);
+
+// An identity for a received direct message that ignores the resend counter, so
+// a retransmission of a message already shown is recognised as the same one.
+//
+// The wire payload cannot do this job: the attempt counter sits inside the
+// encrypted plaintext, so every retry is a different ciphertext and a different
+// payload. Only the decrypted content identifies the message.
+#define MC_DM_IDENTITY_LEN 16
+void mc_dm_identity(uint8_t out[MC_DM_IDENTITY_LEN], const uint8_t sender_public_key[MC_PUB_KEY_SIZE],
+                    uint32_t timestamp, const char* text);

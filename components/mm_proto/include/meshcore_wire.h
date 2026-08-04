@@ -158,9 +158,22 @@ uint8_t mc_datagram_build(uint8_t dest_hash, uint8_t src_hash, const uint8_t mac
 // An acknowledgement carries the four-byte hash in the clear. It proves the
 // recipient decrypted the message, not merely that a frame arrived, because the
 // hash is computed over the plaintext.
-#define MC_ACK_HASH_SIZE 4
+//
+// Six bytes go on the wire although only four are the hash. The fifth is the
+// sender's extended attempt byte and the sixth is random, and both exist for the
+// same reason: repeaters and receivers suppress packets they have seen before,
+// keyed on content. Two acknowledgements for the same message would otherwise be
+// byte-identical, and the second would be dropped by the mesh rather than
+// delivered -- so the padding is what makes a repeated acknowledgement
+// deliverable at all.
+#define MC_ACK_HASH_SIZE    4
+#define MC_ACK_PAYLOAD_SIZE 6
 
-uint8_t mc_ack_build(const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t* out, size_t out_max);
+// `nonce` is the random sixth byte. Supplied by the caller rather than drawn
+// here, because this file stays free of ESP-IDF so its codecs remain testable
+// on the host.
+uint8_t mc_ack_build(const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t extended_attempt, uint8_t nonce, uint8_t* out,
+                     size_t out_max);
 bool    mc_ack_parse(const uint8_t* payload, uint8_t size, uint8_t out_hash[MC_ACK_HASH_SIZE]);
 
 const char* mc_role_name(mc_role_t role);

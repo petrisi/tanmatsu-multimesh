@@ -27,6 +27,7 @@
 #define MT_PORTNUM_TEXT_MESSAGE 1
 #define MT_PORTNUM_POSITION     3
 #define MT_PORTNUM_NODEINFO     4
+#define MT_PORTNUM_ROUTING      5
 #define MT_PORTNUM_TELEMETRY    67
 
 typedef struct {
@@ -40,6 +41,7 @@ typedef struct {
 
     uint8_t  hop_limit;
     uint8_t  hop_start;
+    bool     want_ack;  // the sender is waiting for a routing acknowledgement
 
     uint8_t  payload_length;
     uint8_t  payload[MT_MAX_PAYLOAD_SIZE];  // still encrypted at this point
@@ -57,18 +59,37 @@ typedef struct {
     uint32_t portnum;
     uint8_t  payload[MT_MAX_PAYLOAD_SIZE];
     size_t   payload_length;
+
+    // Which earlier packet this one answers. On a ROUTING_APP reply it is the id
+    // of the message being acknowledged, which is the only thing tying an
+    // acknowledgement back to what it acknowledges.
+    uint32_t request_id;
+    bool     has_request_id;
 } mt_data_t;
 
 // Minimal protobuf reader for the Data submessage: field 1 varint portnum,
-// field 2 bytes payload. Everything else is skipped by wire type.
+// field 2 bytes payload, field 6 fixed32 request_id. Everything else is skipped
+// by wire type.
 //
 // This doubles as the "is the key right" test. AES-CTR never fails loudly, so a
 // wrong channel key yields random bytes; strict parsing is what rejects them.
 bool mt_data_parse(const uint8_t* buf, size_t len, mt_data_t* out);
 
-// Encode a Data submessage: field 1 varint portnum, field 2 bytes payload.
+// Encode a Data submessage. `request_id` of zero is omitted, which is what
+// proto3 does with a default value and what every other client expects.
 // Returns the encoded length, or 0 if it will not fit.
-size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint8_t* out, size_t out_max);
+size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint32_t request_id, uint8_t* out,
+                      size_t out_max);
+
+// The Routing submessage that acknowledges a message: variant 3, error_reason,
+// set to NONE. Two bytes, but they have to be exactly these two -- an empty
+// payload is a different thing and other clients ignore it.
+#define MT_ROUTING_ACK_LEN 2
+size_t mt_routing_ack_encode(uint8_t* out, size_t out_max);
+
+// True when a decoded Routing payload says the message succeeded rather than
+// carrying a routing error.
+bool mt_routing_is_ack(const uint8_t* payload, size_t len);
 
 // Assemble a complete frame: the 16-byte header followed by already-encrypted
 // payload. Returns the frame length, or 0 if it will not fit.
@@ -76,8 +97,11 @@ size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_l
 // `hop_limit` is written to both the limit and the start field: a receiver
 // computes hops taken as start minus limit, so leaving start at zero makes the
 // hop count unreadable for everyone downstream.
+//
+// `want_ack` asks the recipient to reply with a routing acknowledgement. Only
+// meaningful on a packet addressed to one node: nobody acknowledges a broadcast.
 uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_limit, uint8_t channel_hash,
-                        const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max);
+                        bool want_ack, const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max);
 
 // The User submessage carried on NODEINFO_APP: how a node announces its names
 // and key. Note the node *number* is not in here -- it comes from the packet

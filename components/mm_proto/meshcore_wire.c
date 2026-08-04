@@ -259,10 +259,13 @@ uint8_t mc_datagram_build(uint8_t dest_hash, uint8_t src_hash, const uint8_t mac
     return (uint8_t)total;
 }
 
-uint8_t mc_ack_build(const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t* out, size_t out_max) {
-    if (out == NULL || hash == NULL || out_max < MC_ACK_HASH_SIZE) return 0;
+uint8_t mc_ack_build(const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t extended_attempt, uint8_t nonce, uint8_t* out,
+                     size_t out_max) {
+    if (out == NULL || hash == NULL || out_max < MC_ACK_PAYLOAD_SIZE) return 0;
     memcpy(out, hash, MC_ACK_HASH_SIZE);
-    return MC_ACK_HASH_SIZE;
+    out[MC_ACK_HASH_SIZE]     = extended_attempt;
+    out[MC_ACK_HASH_SIZE + 1] = nonce;
+    return MC_ACK_PAYLOAD_SIZE;
 }
 
 bool mc_ack_parse(const uint8_t* payload, uint8_t size, uint8_t out_hash[MC_ACK_HASH_SIZE]) {

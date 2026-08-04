@@ -10,6 +10,7 @@
 #include "dedup.h"
 #include "ed25519.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "mesh_net.h"
 #include "meshcore_crypto.h"
 #include "meshcore_wire.h"
@@ -20,6 +21,11 @@ static const char TAG[] = "net_mc";
 static uint32_t adverts = 0;
 static uint32_t grp_txt = 0;
 static dedup_t  seen;
+
+// Direct messages need a second ring keyed on content rather than on the wire
+// payload. A resend differs on the wire -- the attempt counter is inside the
+// ciphertext -- so only what the message says identifies it.
+static dedup_t  dm_seen;
 
 // Frames we transmitted, still listening for a repeater to echo them back.
 // A channel broadcast has no destination to filter on, so without this our own
@@ -96,9 +102,9 @@ typedef struct {
 
 static pending_ack_t acks[MAX_PENDING_ACKS];
 
-static void queue_ack(const uint8_t hash[MC_ACK_HASH_SIZE]) {
-    uint8_t payload[MC_ACK_HASH_SIZE];
-    uint8_t payload_len = mc_ack_build(hash, payload, sizeof(payload));
+static void queue_ack(const uint8_t hash[MC_ACK_HASH_SIZE], uint8_t extended_attempt) {
+    uint8_t payload[MC_ACK_PAYLOAD_SIZE];
+    uint8_t payload_len = mc_ack_build(hash, extended_attempt, (uint8_t)esp_random(), payload, sizeof(payload));
     if (payload_len == 0) return;
 
     for (int i = 0; i < MAX_PENDING_ACKS; i++) {
@@ -113,7 +119,8 @@ static void queue_ack(const uint8_t hash[MC_ACK_HASH_SIZE]) {
     ESP_LOGW(TAG, "no slot for an acknowledgement; the sender will retry");
 }
 
-bool mc_take_pending_ack(uint8_t* out, size_t out_max, uint8_t* out_len) {
+// See mesh_net.h: built here, queued by the event loop.
+static bool meshcore_take_pending_ack(uint8_t* out, size_t out_max, uint8_t* out_len) {
     if (out == NULL || out_len == NULL) return false;
     for (int i = 0; i < MAX_PENDING_ACKS; i++) {
         if (!acks[i].active || acks[i].length > out_max) continue;
@@ -127,6 +134,7 @@ bool mc_take_pending_ack(uint8_t* out, size_t out_max, uint8_t* out_len) {
 
 static bool meshcore_init(void) {
     dedup_reset(&seen);
+    dedup_reset(&dm_seen);
     memset(pending, 0, sizeof(pending));
     memset(acks, 0, sizeof(acks));
     return mc_crypto_init();
@@ -221,6 +229,34 @@ static bool handle_datagram(const mc_packet_t* packet, mesh_state_t* mesh, const
 
         node->last_heard = (uint32_t)time(NULL);
 
+        // Acknowledge before anything else, and acknowledge every copy. The
+        // sender keeps resending until it hears one, so a retransmission of
+        // something we have already shown still needs an answer -- staying quiet
+        // because we recognise it is what makes the sender try again.
+        //
+        // Hashed over the bytes as they arrived rather than a re-framing of the
+        // decoded fields: any difference produces an acknowledgement the sender
+        // does not recognise, which looks exactly like a lost message.
+        uint8_t hash[MC_ACK_HASH_SIZE];
+        if (mc_dm_ack_hash(hash, decoded.plain, decoded.signed_len, node->key)) {
+            // Upstream mixes in the byte after the text's terminator, which
+            // carries the attempt number on a fourth or later try. Zero when the
+            // frame is too short to hold one.
+            uint8_t extended = decoded.signed_len + 1 < decoded.plain_len ? decoded.plain[decoded.signed_len + 1] : 0;
+            queue_ack(hash, extended);
+        }
+
+        // Every retry is a fresh ciphertext -- the attempt counter lives inside
+        // the encrypted plaintext -- so payload dedup cannot catch it. Identify
+        // the message by what it says instead, and show it once.
+        uint8_t identity_key[MC_DM_IDENTITY_LEN];
+        mc_dm_identity(identity_key, node->key, decoded.timestamp, decoded.text);
+        if (dedup_check(&dm_seen, identity_key, sizeof(identity_key))) {
+            mesh->stats.duplicates++;
+            ESP_LOGD(TAG, "dm resend, acknowledged again");
+            return false;
+        }
+
         char who[SENDER_MAX];
         model_node_label(node, MESH_MC, who, sizeof(who));
 
@@ -233,17 +269,6 @@ static bool handle_datagram(const mc_packet_t* packet, mesh_state_t* mesh, const
         msg->hops             = packet->hop_count;
         msg->path_len = packet->path_length > sizeof(msg->path) ? (uint8_t)sizeof(msg->path) : packet->path_length;
         memcpy(msg->path, packet->path, msg->path_len);
-
-        // Acknowledge it. The hash is over the plaintext and the *sender's* key,
-        // so returning it proves we read the message rather than merely heard
-        // the frame -- which is the whole point of it.
-        uint8_t plain[MC_MAX_PAYLOAD_SIZE];
-        size_t  plain_len = mc_dm_frame_plaintext(decoded.timestamp, decoded.attempt, decoded.text, plain,
-                                                  sizeof(plain), NULL);
-        if (plain_len > 0) {
-            uint8_t hash[MC_ACK_HASH_SIZE];
-            if (mc_dm_ack_hash(hash, plain, decoded.signed_len, node->key)) queue_ack(hash);
-        }
 
         mesh->stats.messages++;
         ESP_LOGI(TAG, "dm from %s: %s", who, decoded.text);
@@ -543,7 +568,8 @@ const mesh_net_t mesh_net_meshcore = {
     .get_config      = meshcore_get_config,
     .prepare_channel = meshcore_prepare_channel,
     .local_sender    = meshcore_local_sender,
-    .handle          = meshcore_handle,
+    .handle           = meshcore_handle,
+    .take_pending_ack = meshcore_take_pending_ack,
     .encode          = meshcore_encode,
     .encode_dm       = meshcore_encode_dm,
     .encode_advert   = meshcore_encode_advert,

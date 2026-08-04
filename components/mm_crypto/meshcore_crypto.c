@@ -251,23 +251,49 @@ bool mc_dm_decrypt(const uint8_t secret[MC_SHARED_SECRET_LEN], const uint8_t mac
     if (!hmac_sha256(secret, MC_SHARED_SECRET_LEN, cipher, cipher_len, computed)) return false;
     if (memcmp(computed, mac, MC_CIPHER_MAC_SIZE) != 0) return false;
 
-    uint8_t plain[MC_MAX_PAYLOAD_SIZE];
-    if (!aes_ecb_decrypt(secret, DM_CIPHER_KEY_LEN, cipher, cipher_len, plain, sizeof(plain))) return false;
+    if (!aes_ecb_decrypt(secret, DM_CIPHER_KEY_LEN, cipher, cipher_len, out->plain, sizeof(out->plain))) return false;
     if (cipher_len < 6) return false;  // timestamp, flags and at least one text byte
+    out->plain_len = (uint8_t)cipher_len;
 
-    memcpy(&out->timestamp, plain, 4);
-    out->text_type = (uint8_t)(plain[4] >> 2);
-    out->attempt   = (uint8_t)(plain[4] & 0x03);
+    memcpy(&out->timestamp, out->plain, 4);
+    out->text_type = (uint8_t)(out->plain[4] >> 2);
+    out->attempt   = (uint8_t)(out->plain[4] & 0x03);
 
     // The text is NUL-terminated inside the padding. Bound the copy by the block
     // length so a frame whose padding was tampered with cannot run off the end.
     size_t max_text = cipher_len - 5;
     if (max_text >= sizeof(out->text)) max_text = sizeof(out->text) - 1;
-    memcpy(out->text, &plain[5], max_text);
+    memcpy(out->text, &out->plain[5], max_text);
     out->text[max_text] = '\0';
 
     out->signed_len = (uint8_t)(5 + strlen(out->text));
     return true;
+}
+
+void mc_dm_identity(uint8_t out[MC_DM_IDENTITY_LEN], const uint8_t sender_public_key[MC_PUB_KEY_SIZE],
+                    uint32_t timestamp, const char* text) {
+    if (out == NULL) return;
+    memset(out, 0, MC_DM_IDENTITY_LEN);
+    if (sender_public_key == NULL || text == NULL) return;
+
+    psa_hash_operation_t operation = PSA_HASH_OPERATION_INIT;
+    uint8_t              digest[32];
+    size_t               digest_len = 0;
+
+    uint8_t stamp[4] = {(uint8_t)timestamp, (uint8_t)(timestamp >> 8), (uint8_t)(timestamp >> 16),
+                        (uint8_t)(timestamp >> 24)};
+
+    bool ok = psa_hash_setup(&operation, PSA_ALG_SHA_256) == PSA_SUCCESS &&
+              psa_hash_update(&operation, sender_public_key, MC_PUB_KEY_SIZE) == PSA_SUCCESS &&
+              psa_hash_update(&operation, stamp, sizeof(stamp)) == PSA_SUCCESS &&
+              psa_hash_update(&operation, (const uint8_t*)text, strlen(text)) == PSA_SUCCESS &&
+              psa_hash_finish(&operation, digest, sizeof(digest), &digest_len) == PSA_SUCCESS && digest_len == 32;
+
+    if (!ok) {
+        psa_hash_abort(&operation);
+        return;
+    }
+    memcpy(out, digest, MC_DM_IDENTITY_LEN);
 }
 
 bool mc_dm_ack_hash(uint8_t out[4], const uint8_t* plain, size_t unpadded_len,

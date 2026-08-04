@@ -21,6 +21,7 @@ bool mt_packet_parse(const uint8_t* data, uint8_t size, mt_packet_t* out) {
 
     out->hop_limit = out->flags & MT_FLAGS_HOP_LIMIT_MASK;
     out->hop_start = (out->flags & MT_FLAGS_HOP_START_MASK) >> MT_FLAGS_HOP_START_SHIFT;
+    out->want_ack  = (out->flags & MT_FLAGS_WANT_ACK_MASK) != 0;
 
     out->payload_length = size - MT_HEADER_SIZE;
     if (out->payload_length > MT_MAX_PAYLOAD_SIZE) {
@@ -101,6 +102,11 @@ bool mt_data_parse(const uint8_t* buf, size_t len, mt_data_t* out) {
             }
             case 5:  // 32-bit
                 if (len - pos < 4) return false;
+                if (field == 6) {
+                    out->request_id = (uint32_t)buf[pos] | ((uint32_t)buf[pos + 1] << 8) |
+                                      ((uint32_t)buf[pos + 2] << 16) | ((uint32_t)buf[pos + 3] << 24);
+                    out->has_request_id = true;
+                }
                 pos += 4;
                 break;
             default:
@@ -129,7 +135,8 @@ static size_t write_varint(uint8_t* out, size_t out_max, uint64_t value) {
     return n;
 }
 
-size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint8_t* out, size_t out_max) {
+size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_len, uint32_t request_id, uint8_t* out,
+                      size_t out_max) {
     if (out == NULL || payload == NULL) return 0;
 
     size_t pos = 0;
@@ -152,11 +159,74 @@ size_t mt_data_encode(uint32_t portnum, const uint8_t* payload, size_t payload_l
 
     if (pos + payload_len > out_max) return 0;
     memcpy(&out[pos], payload, payload_len);
-    return pos + payload_len;
+    pos += payload_len;
+
+    // Field 6, wire type 5: request_id, a fixed32 rather than a varint. Written
+    // last because it is the rarest, and omitted at zero like any proto3 default.
+    if (request_id != 0) {
+        n = write_varint(&out[pos], out_max - pos, (6 << 3) | 5);
+        if (n == 0) return 0;
+        pos += n;
+        if (pos + 4 > out_max) return 0;
+        out[pos++] = (uint8_t)request_id;
+        out[pos++] = (uint8_t)(request_id >> 8);
+        out[pos++] = (uint8_t)(request_id >> 16);
+        out[pos++] = (uint8_t)(request_id >> 24);
+    }
+
+    return pos;
+}
+
+size_t mt_routing_ack_encode(uint8_t* out, size_t out_max) {
+    if (out == NULL || out_max < MT_ROUTING_ACK_LEN) return 0;
+    // Routing is a oneof, so the chosen variant is written even when its value
+    // is the default: field 3, varint, error_reason = NONE.
+    out[0] = (3 << 3) | 0;
+    out[1] = 0;
+    return MT_ROUTING_ACK_LEN;
+}
+
+bool mt_routing_is_ack(const uint8_t* payload, size_t len) {
+    if (payload == NULL) return false;
+
+    size_t pos = 0;
+    while (pos < len) {
+        uint64_t key;
+        if (!read_varint(payload, len, &pos, &key)) return false;
+
+        uint32_t field     = (uint32_t)(key >> 3);
+        uint8_t  wire_type = (uint8_t)(key & 0x07);
+
+        if (field == 3 && wire_type == 0) {
+            uint64_t value;
+            if (!read_varint(payload, len, &pos, &value)) return false;
+            return value == 0;  // NONE; anything else is a routing failure
+        }
+
+        // A route request or reply is not an acknowledgement.
+        switch (wire_type) {
+            case 0: {
+                uint64_t skip;
+                if (!read_varint(payload, len, &pos, &skip)) return false;
+                break;
+            }
+            case 2: {
+                uint64_t length;
+                if (!read_varint(payload, len, &pos, &length)) return false;
+                if (length > len - pos) return false;
+                pos += (size_t)length;
+                break;
+            }
+            case 5: pos += 4; break;
+            case 1: pos += 8; break;
+            default: return false;
+        }
+    }
+    return false;
 }
 
 uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_limit, uint8_t channel_hash,
-                        const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max) {
+                        bool want_ack, const uint8_t* payload, uint8_t payload_len, uint8_t* out, size_t out_max) {
     if (out == NULL || payload == NULL) return 0;
 
     size_t total = MT_HEADER_SIZE + payload_len;
@@ -177,9 +247,10 @@ uint8_t mt_packet_build(uint32_t to, uint32_t from, uint32_t id, uint8_t hop_lim
     out[11] = (uint8_t)(id >> 24);
 
     out[12] = (uint8_t)((hop_limit & MT_FLAGS_HOP_LIMIT_MASK) |
-                        ((hop_limit << MT_FLAGS_HOP_START_SHIFT) & MT_FLAGS_HOP_START_MASK));
+                        ((hop_limit << MT_FLAGS_HOP_START_SHIFT) & MT_FLAGS_HOP_START_MASK) |
+                        (want_ack ? MT_FLAGS_WANT_ACK_MASK : 0));
     out[13] = channel_hash;
-    out[14] = 0;  // next_hop: unset, this is a broadcast
+    out[14] = 0;  // next_hop: unset, we do not use routed delivery
     out[15] = 0;  // relay_node: filled in by whoever relays us
 
     memcpy(&out[MT_HEADER_SIZE], payload, payload_len);

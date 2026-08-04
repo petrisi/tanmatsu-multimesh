@@ -100,9 +100,61 @@ static bool credit_repeat(mesh_state_t* mesh, uint32_t from, uint32_t id) {
     return false;
 }
 
+static uint8_t encode_to_node(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, uint32_t portnum,
+                              const uint8_t* body, size_t body_len, uint32_t request_id, bool want_ack,
+                              uint32_t msg_seq, uint8_t* out, size_t out_max);
+
+// --- acknowledgements ----------------------------------------------------
+//
+// Same arrangement as MeshCore: receive builds the frame, the event loop queues
+// it, because receive runs on the event loop and transmitting blocks.
+
+#define MAX_PENDING_ACKS 4
+
+typedef struct {
+    bool    active;
+    uint8_t frame[MT_HEADER_SIZE + MT_MAX_PAYLOAD_SIZE];
+    uint8_t length;
+} pending_ack_t;
+
+static pending_ack_t acks[MAX_PENDING_ACKS];
+
+static void queue_ack(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, uint32_t request_id) {
+    uint8_t routing[MT_ROUTING_ACK_LEN];
+    size_t  routing_len = mt_routing_ack_encode(routing, sizeof(routing));
+    if (routing_len == 0) return;
+
+    for (int i = 0; i < MAX_PENDING_ACKS; i++) {
+        if (acks[i].active) continue;
+
+        // The reply is encrypted the same way the message was: end to end when
+        // we hold their key, channel otherwise. It carries no want_ack of its
+        // own -- acknowledging an acknowledgement never terminates.
+        acks[i].length = encode_to_node(mesh, identity, peer, MT_PORTNUM_ROUTING, routing, routing_len, request_id,
+                                        false, UINT32_MAX, acks[i].frame, sizeof(acks[i].frame));
+        acks[i].active = acks[i].length > 0;
+        return;
+    }
+    ESP_LOGW(TAG, "no slot for an acknowledgement; the sender will retry");
+}
+
+// See mesh_net.h: built here, queued by the event loop.
+static bool meshtastic_take_pending_ack(uint8_t* out, size_t out_max, uint8_t* out_len) {
+    if (out == NULL || out_len == NULL) return false;
+    for (int i = 0; i < MAX_PENDING_ACKS; i++) {
+        if (!acks[i].active || acks[i].length > out_max) continue;
+        memcpy(out, acks[i].frame, acks[i].length);
+        *out_len       = acks[i].length;
+        acks[i].active = false;
+        return true;
+    }
+    return false;
+}
+
 static bool meshtastic_init(void) {
     dedup_reset(&seen);
     memset(pending, 0, sizeof(pending));
+    memset(acks, 0, sizeof(acks));
     return true;
 }
 
@@ -185,8 +237,31 @@ static bool try_pki(mt_packet_t* packet, mesh_state_t* mesh, const identity_t* i
 // the row's channel column; `dm` says the packet was addressed to us rather than
 // broadcast, which is true of both an end-to-end message and one merely
 // addressed to us under a channel key.
+// A routing reply naming one of our messages. Meshtastic has no separate ack
+// packet: an acknowledgement is a ROUTING_APP payload carrying a success code,
+// tied to what it acknowledges only by request_id.
+static bool handle_routing(const mt_data_t* data, mesh_state_t* mesh) {
+    if (!data->has_request_id) return false;
+    if (!mt_routing_is_ack(data->payload, data->payload_length)) return false;
+
+    for (int i = 0; i < mesh->count; i++) {
+        message_t* msg = (message_t*)model_message_at(mesh, i);
+        if (msg == NULL || !msg->used || !msg->outgoing || !msg->dm) continue;
+        if (msg->expected_ack != data->request_id || msg->acked) continue;
+
+        msg->acked = true;
+        msg->tx    = TX_CONFIRMED;
+        ESP_LOGI(TAG, "dm to %s acknowledged", msg->peer);
+        return true;
+    }
+    return false;
+}
+
+// `duplicate` means we have seen this packet before. It is still decoded and
+// still acknowledged -- only the display is suppressed.
 static bool deliver(const mt_data_t* data, const mt_packet_t* packet, mesh_state_t* mesh, node_t* node,
-                    const lora_protocol_lora_packet_t* pkt, int channel, bool dm, const identity_t* identity) {
+                    const lora_protocol_lora_packet_t* pkt, int channel, bool dm, bool duplicate,
+                    const identity_t* identity) {
     // NodeInfo is what turns a bare node number into a name, and where the key
     // for an end-to-end conversation comes from. Handled before the text path
     // because it is not a message and must not be shown as one.
@@ -215,6 +290,12 @@ static bool deliver(const mt_data_t* data, const mt_packet_t* packet, mesh_state
         return false;
     }
 
+    if (data->portnum == MT_PORTNUM_ROUTING) {
+        bool matched = handle_routing(data, mesh);
+        other_ports++;
+        return matched;
+    }
+
     if (data->portnum != MT_PORTNUM_TEXT_MESSAGE) {
         other_ports++;
         return false;
@@ -235,6 +316,13 @@ static bool deliver(const mt_data_t* data, const mt_packet_t* packet, mesh_state
     } else {
         snprintf(who, sizeof(who), "%04lx", (unsigned long)(packet->from & 0xFFFF));
     }
+
+    // Acknowledge before displaying, and acknowledge every copy: the sender
+    // retransmits until it hears one, so staying quiet about a repeat we already
+    // recognise is what makes it try again. Dedup drops the display, not the
+    // reply.
+    if (dm && packet->want_ack && node != NULL) queue_ack(mesh, identity, node, packet->id);
+    if (duplicate) return false;
 
     message_t* msg = model_push(mesh, (uint8_t)channel, who, named, body, false);
     msg->dm        = dm;
@@ -269,13 +357,22 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
     // pair is both cheaper and more accurate than fingerprinting bytes.
     uint8_t key[8];
     tx_key(packet.from, packet.id, key);
-    if (dedup_check(&seen, key, sizeof(key))) {
+    bool duplicate = dedup_check(&seen, key, sizeof(key));
+    if (duplicate) {
         mesh->stats.duplicates++;
         // A repeat of something we sent is not noise: it is the only delivery
         // confirmation available for a broadcast.
         credit_repeat(mesh, packet.from, packet.id);
-        detail(mesh);
-        return false;
+
+        // A retransmission addressed to us still has to be answered. Meshtastic
+        // reuses the packet id when it retries, so this is exactly the traffic
+        // dedup would otherwise swallow -- and the sender only stops retrying
+        // once it hears an acknowledgement. Upstream skips its own seen-check
+        // for the same reason. Anything else can be dropped here.
+        if (!(packet.want_ack && packet.to == identity->node_num)) {
+            detail(mesh);
+            return false;
+        }
     }
 
     // Every packet tells us a node exists, whatever it turns out to contain and
@@ -292,7 +389,7 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
     // match by coincidence and then fail to parse.
     mt_data_t pki_data;
     if (try_pki(&packet, mesh, identity, node, &pki_data)) {
-        bool shown = deliver(&pki_data, &packet, mesh, node, pkt, (uint8_t)mesh->input_channel, true, identity);
+        bool shown = deliver(&pki_data, &packet, mesh, node, pkt, (uint8_t)mesh->input_channel, true, duplicate, identity);
         detail(mesh);
         return shown;
     }
@@ -317,7 +414,7 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         // NodeInfo is what turns a bare node number into a name. Handled before
         // the text-message path because it is not a message and must not be
         // shown as one.
-        bool shown = deliver(&data, &attempt, mesh, node, pkt, i, attempt.to == identity->node_num, identity);
+        bool shown = deliver(&data, &attempt, mesh, node, pkt, i, attempt.to == identity->node_num, duplicate, identity);
         detail(mesh);
         return shown;
     }
@@ -340,7 +437,7 @@ static uint8_t encode_frame(mesh_state_t* mesh, uint8_t channel, const identity_
     if (!ch->ready) return 0;
 
     uint8_t payload[MT_MAX_PAYLOAD_SIZE];
-    size_t  payload_len = mt_data_encode(portnum, body, body_len, payload, sizeof(payload));
+    size_t  payload_len = mt_data_encode(portnum, body, body_len, 0, payload, sizeof(payload));
     if (payload_len == 0) return 0;
 
     // The packet id is half the AES-CTR nonce. Reusing one under the same
@@ -354,8 +451,9 @@ static uint8_t encode_frame(mesh_state_t* mesh, uint8_t channel, const identity_
     if (ch->key_len) memcpy(key.bytes, ch->key, ch->key_len);
     if (!mt_encrypt(&key, identity->node_num, id, payload, payload_len)) return 0;
 
-    uint8_t len = mt_packet_build(MT_BROADCAST_ADDR, identity->node_num, id, MT_DEFAULT_HOPS, ch->hash, payload,
-                                  (uint8_t)payload_len, out, out_max);
+    // Nobody acknowledges a broadcast, so want_ack is never set here.
+    uint8_t len = mt_packet_build(MT_BROADCAST_ADDR, identity->node_num, id, MT_DEFAULT_HOPS, ch->hash, false,
+                                  payload, (uint8_t)payload_len, out, out_max);
     if (len == 0) return 0;
 
     track_transmission(identity->node_num, id, msg_seq);
@@ -368,18 +466,21 @@ static uint8_t meshtastic_encode(mesh_state_t* mesh, uint8_t channel, const iden
                         msg_seq, out, out_max);
 }
 
-// A direct message. End-to-end encrypted when the recipient has published a key
-// and we have agreed one with them; otherwise addressed to them but encrypted
-// under the channel key, which every node understands and everyone on the
-// channel can read. The UI says which happened -- silently sending something
-// weaker than the user expects would be the worse failure.
-static uint8_t meshtastic_encode_dm(mesh_state_t* mesh, const identity_t* identity, const node_t* peer,
-                                    const char* text, message_t* msg, uint8_t* out, size_t out_max) {
+// Everything addressed to a single node goes through here: a text message, or
+// the routing reply that acknowledges one.
+//
+// End-to-end encrypted when the recipient has published a key and we have agreed
+// one with them; otherwise addressed to them but encrypted under the channel key,
+// which every node understands and everyone on the channel can read. The UI says
+// which happened -- silently sending something weaker than the user expects
+// would be the worse failure.
+static uint8_t encode_to_node(mesh_state_t* mesh, const identity_t* identity, const node_t* peer, uint32_t portnum,
+                              const uint8_t* body, size_t body_len, uint32_t request_id, bool want_ack,
+                              uint32_t msg_seq, uint8_t* out, size_t out_max) {
     if (peer == NULL || peer->node_num == 0) return 0;
 
     uint8_t payload[MT_MAX_PAYLOAD_SIZE];
-    size_t  payload_len = mt_data_encode(MT_PORTNUM_TEXT_MESSAGE, (const uint8_t*)text, strlen(text), payload,
-                                         sizeof(payload));
+    size_t  payload_len = mt_data_encode(portnum, body, body_len, request_id, payload, sizeof(payload));
     if (payload_len == 0) return 0;
 
     uint32_t id = esp_random();
@@ -398,14 +499,11 @@ static uint8_t meshtastic_encode_dm(mesh_state_t* mesh, const identity_t* identi
         }
 
         // Channel hash zero is how the far end knows to try its own key.
-        uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, MT_DEFAULT_HOPS, 0, sealed,
+        uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, MT_DEFAULT_HOPS, 0, want_ack, sealed,
                                       (uint8_t)(payload_len + MT_PKI_OVERHEAD), out, out_max);
         if (len == 0) return 0;
 
-        if (msg) {
-            msg->acked = false;
-            track_transmission(identity->node_num, id, msg->seq);
-        }
+        if (msg_seq != UINT32_MAX) track_transmission(identity->node_num, id, msg_seq);
         return len;
     }
 
@@ -418,11 +516,31 @@ static uint8_t meshtastic_encode_dm(mesh_state_t* mesh, const identity_t* identi
     if (ch->key_len) memcpy(key.bytes, ch->key, ch->key_len);
     if (!mt_encrypt(&key, identity->node_num, id, payload, payload_len)) return 0;
 
-    uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, MT_DEFAULT_HOPS, ch->hash, payload,
-                                  (uint8_t)payload_len, out, out_max);
+    uint8_t len = mt_packet_build(peer->node_num, identity->node_num, id, MT_DEFAULT_HOPS, ch->hash, want_ack,
+                                  payload, (uint8_t)payload_len, out, out_max);
     if (len == 0) return 0;
 
-    if (msg) track_transmission(identity->node_num, id, msg->seq);
+    if (msg_seq != UINT32_MAX) track_transmission(identity->node_num, id, msg_seq);
+    return len;
+}
+
+static uint8_t meshtastic_encode_dm(mesh_state_t* mesh, const identity_t* identity, const node_t* peer,
+                                    const char* text, message_t* msg, uint8_t* out, size_t out_max) {
+    // want_ack is what asks the recipient for a routing reply. Without it a
+    // Meshtastic node stays silent and there is nothing to confirm delivery
+    // with, which is why our direct messages never showed as acknowledged.
+    uint8_t len = encode_to_node(mesh, identity, peer, MT_PORTNUM_TEXT_MESSAGE, (const uint8_t*)text, strlen(text), 0,
+                                 true, msg ? msg->seq : UINT32_MAX, out, out_max);
+    if (len == 0) return 0;
+
+    if (msg) {
+        msg->acked = false;
+        // The recipient names the packet it is answering, so remember which one
+        // this was. Recovered from the frame rather than threaded back out of
+        // the encoder, because the header is where the id actually ended up.
+        msg->expected_ack = (uint32_t)out[8] | ((uint32_t)out[9] << 8) | ((uint32_t)out[10] << 16) |
+                            ((uint32_t)out[11] << 24);
+    }
     return len;
 }
 
@@ -463,7 +581,8 @@ const mesh_net_t mesh_net_meshtastic = {
     .get_config      = meshtastic_get_config,
     .prepare_channel = meshtastic_prepare_channel,
     .local_sender    = meshtastic_local_sender,
-    .handle          = meshtastic_handle,
+    .handle           = meshtastic_handle,
+    .take_pending_ack = meshtastic_take_pending_ack,
     .encode          = meshtastic_encode,
     .encode_dm       = meshtastic_encode_dm,
     .encode_advert   = meshtastic_encode_advert,
