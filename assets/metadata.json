@@ -1,17 +1,23 @@
 {
   "name": "MultiMesh",
-  "description": "Mesh communications for MeshCore and Meshtastic, switched with one key.",
-  "categories": ["Communication"],
+  "description": "Mesh communications for MeshCore and Meshtastic - switched with one key.",
+  "categories": ["communication", "tools"],
+  "version": "0.9.0",
+  "icon": {
+    "16x16": "icon16.png",
+    "32x32": "icon32.png",
+    "64x64": "icon64.png"
+  },
   "author": "Petri Simolin",
   "license_type": "MIT",
-  "version": 37,
-  "icon": { "32x32": "icon32.png" },
+  "license_file": "LICENSE",
   "application": [
     {
-      "targets": ["Tanmatsu"],
+      "targets": ["tanmatsu", "konsool"],
       "type": "appfs",
-      "revision": 37,
-      "executable": "fi.ps.multimesh"
+      "revision": 38,
+      "executable": "multimesh.bin",
+      "assets": []
     }
   ]
 }

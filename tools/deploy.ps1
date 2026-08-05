@@ -8,11 +8,13 @@
 # to a USB symbol. In debug mode this enumerates as COM ports instead and the
 # tool will report "Badge not found".
 
+# The revision comes from assets/metadata.json rather than the command line.
+# Passing it by hand let the deployed build and the published metadata drift
+# apart, which is invisible until a device declines an update it should have
+# taken.
 param(
     [switch]$Start,
-    [string]$Slug    = "fi.ps.multimesh",
-    [string]$Title   = "MultiMesh",
-    [int]   $Version = 0
+    [int]   $Revision = 0   # 0 = read it from the metadata
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,15 +22,25 @@ $root      = Split-Path -Parent $PSScriptRoot
 $badgelink = Join-Path $PSScriptRoot "badgelink"
 $py        = Join-Path $badgelink ".venv\Scripts\python.exe"
 $bin       = Join-Path $root "build\tanmatsu\application.bin"
+$metaPath  = Join-Path $root "assets\metadata.json"
 
-if (-not (Test-Path $py))  { throw "BadgeLink venv missing at $py" }
-if (-not (Test-Path $bin)) { throw "No build output at $bin - run tools\build.ps1 first" }
+if (-not (Test-Path $py))       { throw "BadgeLink venv missing at $py - see tools\README.md" }
+if (-not (Test-Path $bin))      { throw "No build output at $bin - run tools\build.ps1 first" }
+if (-not (Test-Path $metaPath)) { throw "Missing $metaPath" }
 
-"Uploading {0:N0} bytes as '{1}' v{2}..." -f (Get-Item $bin).Length, $Slug, $Version
+$meta  = Get-Content $metaPath -Raw | ConvertFrom-Json
+$app   = $meta.application | Where-Object { $_.targets -contains "tanmatsu" } | Select-Object -First 1
+if (-not $app) { throw "No application entry targeting 'tanmatsu' in $metaPath" }
+
+$Slug  = "fi.ps.multimesh"
+$Title = $meta.name
+if ($Revision -eq 0) { $Revision = [int]$app.revision }
+
+"Uploading {0:N0} bytes as '{1}' v{2} rev {3}..." -f (Get-Item $bin).Length, $Slug, $meta.version, $Revision
 
 Push-Location $badgelink
 try {
-    & $py badgelink.py appfs upload $Slug $Title $Version $bin
+    & $py badgelink.py appfs upload $Slug $Title $Revision $bin
     if ($LASTEXITCODE -ne 0) { throw "appfs upload failed with exit code $LASTEXITCODE" }
 
     if ($Start) {
