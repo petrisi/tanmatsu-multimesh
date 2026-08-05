@@ -209,7 +209,10 @@ Issues and pull requests are welcome. Two things worth knowing first:
 
 ## Credits and licensing
 
-MultiMesh is licensed under the [MIT License](LICENSE).
+MultiMesh is licensed under the [MIT License](LICENSE). The compiled firmware
+links third-party components under MIT, Apache-2.0 and BSD-3-Clause; their
+required notices are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). No
+copyleft code is linked or distributed.
 
 The MeshCore and Meshtastic support here is an **independent implementation from
 protocol behaviour and published documentation**. No code is derived from the

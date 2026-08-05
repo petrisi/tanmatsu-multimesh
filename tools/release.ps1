@@ -71,6 +71,12 @@ Copy-Item $bin (Join-Path $dest $exeName) -Force
 Copy-Item $metaPath (Join-Path $dest "metadata.json") -Force
 Copy-Item (Join-Path $root "LICENSE") (Join-Path $dest "LICENSE") -Force
 
+# The binary statically links MIT and Apache-2.0 components, whose licences
+# require their notices to travel with it. Shipping the binary without them
+# would be distributing other people's work without the attribution they ask
+# for -- which costs one file to avoid.
+Copy-Item (Join-Path $root "THIRD-PARTY-NOTICES.md") (Join-Path $dest "THIRD-PARTY-NOTICES.md") -Force
+
 foreach ($size in @("16", "32", "64")) {
     $icon = "icon$size.png"
     $src  = Join-Path $root "assets\$icon"
@@ -97,7 +103,8 @@ if ((Test-Path (Join-Path $validator "node_modules")) -and (Get-Command node -Er
 }
 
 # Every file named in the metadata has to exist under the name it is named by.
-foreach ($name in @($exeName, "metadata.json", "LICENSE", "icon16.png", "icon32.png", "icon64.png")) {
+foreach ($name in @($exeName, "metadata.json", "LICENSE", "THIRD-PARTY-NOTICES.md",
+                    "icon16.png", "icon32.png", "icon64.png")) {
     if (-not (Test-Path (Join-Path $dest $name))) { throw "Staged folder is missing $name" }
 }
 
