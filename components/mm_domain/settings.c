@@ -227,6 +227,7 @@ typedef struct __attribute__((packed)) {
     int32_t latitude;
     int32_t longitude;
     uint8_t display_off_minutes;
+    uint8_t kbd_off_minutes;
     uint8_t mt_default_hops;
     uint8_t mt_role;
     uint8_t mc_repeater;
@@ -242,6 +243,7 @@ void settings_save_config(const app_model_t* model) {
           .latitude            = s->latitude,
           .longitude           = s->longitude,
           .display_off_minutes = s->display_off_minutes,
+          .kbd_off_minutes     = s->kbd_off_minutes,
           .mt_default_hops     = s->mt_default_hops,
           .mt_role             = s->mt_role,
           .mc_repeater         = s->mc_repeater ? 1 : 0,
@@ -266,6 +268,7 @@ static void load_config(app_model_t* model) {
     s->mc_repeater  = stored.mc_repeater != 0;
 
     s->display_off_minutes = stored.display_off_minutes;
+    s->kbd_off_minutes     = stored.kbd_off_minutes;
     // Clamped rather than trusted: a record written by a build with different
     // limits must not put an illegal hop count on the air.
     s->mt_default_hops = stored.mt_default_hops > SET_HOPS_MAX_STORED ? SET_HOPS_MAX_STORED : stored.mt_default_hops;

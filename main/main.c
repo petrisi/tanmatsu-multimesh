@@ -1276,35 +1276,62 @@ static void handle_node_short_key(bsp_input_navigation_key_t key) {
     }
 }
 
-// --- screen power --------------------------------------------------------
+// --- screen and keyboard power -------------------------------------------
 //
-// The backlight is most of what the display costs, and the BSP exposes only its
-// brightness -- so "off" is brightness zero, with the panel and the radio still
-// running. Messages keep arriving while it is dark, which is the point: this is
-// a power measure, not a sleep mode.
+// Two backlights, two timers, one idle clock. The BSP exposes only brightness
+// for either, so "off" is brightness zero: the panel, the keys and the radio
+// all keep running and messages keep arriving. This is a power measure, not a
+// sleep mode.
+//
+// The keyboard goes dark sooner by default. Lit keys are worth having for the
+// moment you are typing; a screen is worth reading long after you stopped.
 
 static uint32_t last_input_ms;
 static bool     screen_dark;
 static uint8_t  screen_brightness = 100;
+static bool     kbd_dark;
+static uint8_t  kbd_brightness = 100;
+
+// Put the keyboard back to the level it was found at. Also called on the way
+// out: leaving the device with dark keys and no application running would look
+// like a fault, and the only cure is a menu the user has no reason to visit.
+static void kbd_restore(void) {
+    if (!kbd_dark) return;
+    bsp_input_set_backlight_brightness(kbd_brightness);
+    kbd_dark = false;
+}
 
 static void screen_wake(void) {
     last_input_ms = now_ms();
+    kbd_restore();
     if (!screen_dark) return;
     bsp_display_set_backlight_brightness(screen_brightness);
     screen_dark = false;
 }
 
 static void screen_tick(void) {
-    if (screen_dark || model.settings.display_off_minutes == 0) return;
     uint32_t idle = now_ms() - last_input_ms;
-    if (idle < (uint32_t)model.settings.display_off_minutes * 60000u) return;
 
-    // Remember what it was, so waking restores the user's brightness rather
-    // than an assumption about it.
-    uint8_t current = 0;
-    if (bsp_display_get_backlight_brightness(&current) == ESP_OK && current > 0) screen_brightness = current;
-    bsp_display_set_backlight_brightness(0);
-    screen_dark = true;
+    if (!screen_dark && model.settings.display_off_minutes > 0 &&
+        idle >= (uint32_t)model.settings.display_off_minutes * 60000u) {
+        // Remember what it was, so waking restores the user's brightness rather
+        // than an assumption about it.
+        uint8_t current = 0;
+        if (bsp_display_get_backlight_brightness(&current) == ESP_OK && current > 0) screen_brightness = current;
+        bsp_display_set_backlight_brightness(0);
+        screen_dark = true;
+    }
+
+    if (!kbd_dark && model.settings.kbd_off_minutes > 0 &&
+        idle >= (uint32_t)model.settings.kbd_off_minutes * 60000u) {
+        // Read it back rather than trusting our own last write: the value makes
+        // a lossy round trip through the coprocessor's 0-255 scale, and the user
+        // may have changed it in the launcher since we started.
+        uint8_t current = 0;
+        if (bsp_input_get_backlight_brightness(&current) == ESP_OK && current > 0) kbd_brightness = current;
+        bsp_input_set_backlight_brightness(0);
+        kbd_dark = true;
+    }
 }
 
 // --- configuration -------------------------------------------------------
@@ -1424,6 +1451,13 @@ static void setting_step(setting_field_t field, int delta) {
             if (v < 0) v = 0;
             if (v > 120) v = 120;
             s->display_off_minutes = (uint8_t)v;
+            break;
+        }
+        case SET_FIELD_KBD_OFF: {
+            int v = (int)s->kbd_off_minutes + delta;
+            if (v < 0) v = 0;
+            if (v > 120) v = 120;
+            s->kbd_off_minutes = (uint8_t)v;
             break;
         }
         case SET_FIELD_MT_HOPS: {
@@ -1647,6 +1681,7 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
                 // done
             } else {
                 ESP_LOGI(TAG, "exit to launcher");
+                kbd_restore();
                 bsp_device_restart_to_launcher();
             }
             break;

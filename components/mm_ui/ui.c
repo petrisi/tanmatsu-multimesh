@@ -1630,6 +1630,15 @@ static void setting_row(const app_model_t* model, setting_field_t field, char* l
                 snprintf(value, value_size, "%u min", (unsigned)s->display_off_minutes);
             }
             break;
+        case SET_FIELD_KBD_OFF:
+            snprintf(label, label_size, "Keyboard off");
+            if (s->kbd_off_minutes == 0) {
+                snprintf(value, value_size, "never");
+                *col = COL_DIM;
+            } else {
+                snprintf(value, value_size, "%u min", (unsigned)s->kbd_off_minutes);
+            }
+            break;
         case SET_FIELD_MT_HOPS:
             snprintf(label, label_size, "Hop limit");
             // Both numbers, because they differ whenever a session has raised
@@ -1719,6 +1728,7 @@ static void draw_settings(const app_model_t* model) {
         case SET_FIELD_LATITUDE:
         case SET_FIELD_LONGITUDE: note = "sent in every MeshCore advert once set"; break;
         case SET_FIELD_DISPLAY_OFF: note = "backlight only - radio keeps running"; break;
+        case SET_FIELD_KBD_OFF: note = "key backlight only - the keys still work"; break;
         case SET_FIELD_MT_HOPS: note = "resets here at start; fn+0..7 for now"; break;
         case SET_FIELD_MT_ROLE: note = "CLIENT forwards for others, MUTE listens only"; break;
         case SET_FIELD_MT_ALWAYS_REPEAT: note = "repeat last, even if another node already did"; break;

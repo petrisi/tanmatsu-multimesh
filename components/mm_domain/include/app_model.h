@@ -366,6 +366,9 @@ typedef enum {
 #define SET_HOPS_MAX_STORED  5  // what may be made permanent
 #define SET_HOPS_MAX_SESSION 7  // what the wire allows, reachable per session
 #define SET_DISPLAY_OFF_DEFAULT 5
+// Shorter than the screen, because the keys are lit for the moment you are
+// typing and the screen is worth reading long after.
+#define SET_KBD_OFF_DEFAULT 1
 
 // Configuration, as distinct from the channels and identity that have their own
 // screens. Persisted whole; an unrecognised version is discarded rather than
@@ -379,6 +382,7 @@ typedef struct {
     int32_t longitude;
 
     uint8_t display_off_minutes;  // 0 = never
+    uint8_t kbd_off_minutes;      // keyboard backlight, 0 = never
 
     // The value the active hop limit is reset to at every start. The active one
     // can be pushed past this for a session, but not made to stick.
@@ -405,6 +409,7 @@ typedef enum {
     SET_FIELD_LATITUDE = 0,
     SET_FIELD_LONGITUDE,
     SET_FIELD_DISPLAY_OFF,
+    SET_FIELD_KBD_OFF,
     SET_FIELD_MT_HOPS,
     SET_FIELD_MT_ROLE,
     SET_FIELD_MT_ALWAYS_REPEAT,
