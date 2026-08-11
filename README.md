@@ -81,11 +81,6 @@ found". The two USB modes are mutually exclusive.
 regenerate the icons with `tools/make-icon.py` if you change them. The version
 and revision live in that metadata, and `deploy.ps1` reads them from there.
 
-To publish to the [Tanmatsu app repository](https://github.com/Nicolai-Electronics/app-repository),
-`tools/release.ps1` builds and stages the binary, icons, licence and metadata
-into a checkout of your fork, then checks the metadata against the store's own
-schema. It stops there; opening the pull request is a deliberate step.
-
 ## Using it
 
 One screen per network, showing every configured channel of that network with a
