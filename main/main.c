@@ -628,6 +628,52 @@ static void composer_send(void) {
     mesh->unseen = 0;
 }
 
+// --- calling CQ ----------------------------------------------------------
+//
+// Hold enter on an empty line and it calls CQ. A general call is the one
+// message worth sending without typing anything, and an empty composer is the
+// only moment enter has nothing else to mean.
+//
+// Held rather than tapped because this transmits: a stray press of the largest
+// key on the board should not put a packet on the air. It goes wherever the
+// composer is pointed, so on a conversation it is a direct message and on a
+// channel it is a broadcast -- the same rule as anything else typed here.
+#define CQ_HOLD_MS 800
+#define CQ_TEXT    "CQ"
+
+static uint32_t enter_down_ms;
+static bool     enter_was_empty;
+static bool     enter_fired;
+
+static void enter_pressed(void) {
+    // Ignore repeats: a key held down may arrive as a stream of presses, and
+    // restarting the clock on each would mean the hold never completes.
+    if (enter_down_ms != 0) return;
+    enter_down_ms   = now_ms();
+    enter_fired     = false;
+    enter_was_empty = model.overlay == OVERLAY_NONE && model.composer_len == 0;
+}
+
+static void enter_released(void) {
+    enter_down_ms = 0;
+}
+
+// Checked from the event loop so the call goes out the moment the hold is long
+// enough, rather than when the finger lifts -- otherwise there is no way to
+// tell a long press from a slow one until it is over.
+static bool cq_hold_tick(void) {
+    if (enter_down_ms == 0 || enter_fired || !enter_was_empty) return false;
+    // Still empty, still the message view: anything typed in the meantime means
+    // the user changed their mind about what enter was for.
+    if (model.overlay != OVERLAY_NONE || model.composer_len != 0) return false;
+    if (now_ms() - enter_down_ms < CQ_HOLD_MS) return false;
+
+    enter_fired = true;
+    composer_set(CQ_TEXT);
+    composer_send();
+    return true;
+}
+
 // --- power ---------------------------------------------------------------
 
 // Reading the gauge is an I2C round trip to the coprocessor, so it is polled on
@@ -2153,6 +2199,15 @@ void app_main(void) {
 
             switch (event.type) {
                 case INPUT_EVENT_TYPE_NAVIGATION:
+                    // Enter is the one key whose release matters: holding it on
+                    // an empty line calls CQ.
+                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_RETURN) {
+                        if (event.args_navigation.state) {
+                            enter_pressed();
+                        } else {
+                            enter_released();
+                        }
+                    }
                     if (event.args_navigation.state) {
                         handle_navigation(event.args_navigation.key, event.args_navigation.modifiers);
                         dirty = true;
@@ -2212,6 +2267,7 @@ void app_main(void) {
         }
     woke:
         screen_tick();
+        if (cq_hold_tick()) dirty = true;
 
         if (radio_poll()) dirty = true;
         if (drain_tx_events()) dirty = true;

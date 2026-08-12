@@ -111,6 +111,7 @@ is no edit mode.
 | fn+↑ | page up · **fn+↓** jump to latest |
 | alt+↑ | selection mode; **enter** opens message details |
 | fn+■ | start/stop session recording |
+| enter | send · **held on an empty line** it calls CQ |
 
 Inside an overlay the same four coloured keys are relabelled on screen, so the
 hint bar is always the authority on what they do.
