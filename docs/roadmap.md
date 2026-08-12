@@ -83,6 +83,24 @@ a companion radio over serial on the CATT port is the workable option, a bare
 SX1262 needs more antenna isolation than a handheld can provide, and the
 CH341-based USB sticks contain no processor of their own and are rejected.
 
+## Brightness scale
+
+The two brightness settings run on their own scale: ten levels spaced
+geometrically, because evenly spaced duty cycles give one visible step and nine
+that do nothing. The launcher's own sliders are a plain percentage of duty.
+
+Two scales for one backlight is a cost, and it is only worth paying while the
+perceptual spacing is earning it. **If it turns out not to help in practice, or
+to cause confusion of its own, these will move to the launcher's scale instead**
+— matching what the device already shows everywhere else is worth more than a
+curve nobody notices.
+
+One symptom to watch, since it is the first thing that would tip the balance: on
+a fresh install the level adopted from the device can read differently from the
+launcher's number, because the level is read back through the hardware rather
+than from the launcher's stored percentage. The light is right, the label may not
+be. It only happens once, before any level has been chosen here.
+
 ## Known limitations
 
 - **RSSI always reads zero.** A bug in the vendor radio driver. Signal quality is
