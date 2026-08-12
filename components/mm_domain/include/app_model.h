@@ -427,6 +427,13 @@ const char*         mt_profile_name(int id);
 
 #define SET_HOPS_MAX_STORED  5  // what may be made permanent
 #define SET_HOPS_MAX_SESSION 7  // what the wire allows, reachable per session
+// Screen brightness, in the steps the setting offers. 0 is stored to mean "not
+// chosen yet", which makes a first run adopt whatever the device is already on
+// rather than overriding it.
+#define SET_BRIGHTNESS_MIN  10
+#define SET_BRIGHTNESS_MAX  100
+#define SET_BRIGHTNESS_STEP 10
+
 #define SET_DISPLAY_OFF_DEFAULT 5
 // Shorter than the screen, because the keys are lit for the moment you are
 // typing and the screen is worth reading long after.
@@ -443,6 +450,7 @@ typedef struct {
     int32_t latitude;
     int32_t longitude;
 
+    uint8_t brightness;           // screen backlight percent, 0 = not chosen yet
     uint8_t display_off_minutes;  // 0 = never
     uint8_t kbd_off_minutes;      // keyboard backlight, 0 = never
 
@@ -478,6 +486,7 @@ typedef struct {
 typedef enum {
     SET_FIELD_LATITUDE = 0,
     SET_FIELD_LONGITUDE,
+    SET_FIELD_BRIGHTNESS,
     SET_FIELD_DISPLAY_OFF,
     SET_FIELD_KBD_OFF,
     SET_FIELD_MT_RADIO,

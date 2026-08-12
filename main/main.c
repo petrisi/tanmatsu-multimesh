@@ -1289,11 +1289,48 @@ static void handle_node_short_key(bsp_input_navigation_key_t key) {
 // The keyboard goes dark sooner by default. Lit keys are worth having for the
 // moment you are typing; a screen is worth reading long after you stopped.
 
+// NEVER read a brightness back after writing one. The BSP converts a
+// percentage to the coprocessor's 0-255 scale with `(pct * 255) / 100` and back
+// with `(raw * 100) / 255`, both truncating, so a round trip loses about one
+// point every time: 10% becomes 25 raw, reads back as 9%, and eight cycles of
+// blank-and-wake take a screen from 10% to 2%. It never reaches zero either --
+// the guard against storing 0 pins it at 1% -- so the display does not blank,
+// it becomes permanently invisible, which looks exactly like a crash.
+//
+// So the level is read once at startup and never again. What we restore is a
+// number we chose, not one the hardware paraphrased back to us.
 static uint32_t last_input_ms;
 static bool     screen_dark;
-static uint8_t  screen_brightness = 100;
 static bool     kbd_dark;
-static uint8_t  kbd_brightness = 100;
+static uint8_t  kbd_brightness = 100;  // read once in screen_power_init()
+
+// Round to the nearest step the setting offers, so a device set to 37% in the
+// launcher becomes 40% here rather than an unreachable value the arrows can
+// never return to.
+static uint8_t brightness_snap(uint8_t pct) {
+    int v = ((int)pct + SET_BRIGHTNESS_STEP / 2) / SET_BRIGHTNESS_STEP * SET_BRIGHTNESS_STEP;
+    if (v < SET_BRIGHTNESS_MIN) v = SET_BRIGHTNESS_MIN;
+    if (v > SET_BRIGHTNESS_MAX) v = SET_BRIGHTNESS_MAX;
+    return (uint8_t)v;
+}
+
+static void screen_power_init(void) {
+    // The only read of either backlight in the whole application.
+    uint8_t current = 0;
+    if (model.settings.brightness == 0) {
+        // No stored preference: adopt whatever the device is already set to, so
+        // a first run does not brighten someone's carefully dimmed screen.
+        model.settings.brightness =
+            (bsp_display_get_backlight_brightness(&current) == ESP_OK && current > 0) ? brightness_snap(current)
+                                                                                     : SET_BRIGHTNESS_MAX;
+    }
+    bsp_display_set_backlight_brightness(model.settings.brightness);
+
+    // The keyboard has no setting of its own, so its level is simply whatever
+    // the device was on. A failed read leaves the 100% default: too bright is
+    // recoverable from the launcher, too dim is what we are fixing.
+    if (bsp_input_get_backlight_brightness(&current) == ESP_OK && current > 0) kbd_brightness = current;
+}
 
 // Put the keyboard back to the level it was found at. Also called on the way
 // out: leaving the device with dark keys and no application running would look
@@ -1304,12 +1341,16 @@ static void kbd_restore(void) {
     kbd_dark = false;
 }
 
+static void screen_restore(void) {
+    if (!screen_dark) return;
+    bsp_display_set_backlight_brightness(model.settings.brightness);
+    screen_dark = false;
+}
+
 static void screen_wake(void) {
     last_input_ms = now_ms();
     kbd_restore();
-    if (!screen_dark) return;
-    bsp_display_set_backlight_brightness(screen_brightness);
-    screen_dark = false;
+    screen_restore();
 }
 
 static void screen_tick(void) {
@@ -1317,21 +1358,12 @@ static void screen_tick(void) {
 
     if (!screen_dark && model.settings.display_off_minutes > 0 &&
         idle >= (uint32_t)model.settings.display_off_minutes * 60000u) {
-        // Remember what it was, so waking restores the user's brightness rather
-        // than an assumption about it.
-        uint8_t current = 0;
-        if (bsp_display_get_backlight_brightness(&current) == ESP_OK && current > 0) screen_brightness = current;
         bsp_display_set_backlight_brightness(0);
         screen_dark = true;
     }
 
     if (!kbd_dark && model.settings.kbd_off_minutes > 0 &&
         idle >= (uint32_t)model.settings.kbd_off_minutes * 60000u) {
-        // Read it back rather than trusting our own last write: the value makes
-        // a lossy round trip through the coprocessor's 0-255 scale, and the user
-        // may have changed it in the launcher since we started.
-        uint8_t current = 0;
-        if (bsp_input_get_backlight_brightness(&current) == ESP_OK && current > 0) kbd_brightness = current;
         bsp_input_set_backlight_brightness(0);
         kbd_dark = true;
     }
@@ -1526,6 +1558,18 @@ static void setting_step(setting_field_t field, int delta) {
     settings_t* s = &model.settings;
 
     switch (field) {
+        case SET_FIELD_BRIGHTNESS: {
+            int v = (int)s->brightness + delta * SET_BRIGHTNESS_STEP;
+            if (v < SET_BRIGHTNESS_MIN) v = SET_BRIGHTNESS_MIN;
+            if (v > SET_BRIGHTNESS_MAX) v = SET_BRIGHTNESS_MAX;
+            s->brightness = (uint8_t)v;
+            // Applied as it is stepped, because judging a brightness from a
+            // number is guesswork. This is also what waking from dark restores,
+            // so the two can never disagree.
+            bsp_display_set_backlight_brightness(s->brightness);
+            screen_dark = false;
+            break;
+        }
         case SET_FIELD_DISPLAY_OFF: {
             int v = (int)s->display_off_minutes + delta;
             if (v < 0) v = 0;
@@ -1661,6 +1705,9 @@ static void handle_settings_key(bsp_input_navigation_key_t key) {
             // unusable until the next reboot, on both networks.
             model.settings = settings_backup;
             apply_settings();
+            // Brightness is applied while it is being stepped, so cancelling has
+            // to put the screen back as well as the setting.
+            bsp_display_set_backlight_brightness(model.settings.brightness);
             model.overlay = OVERLAY_NONE;
             break;
         default: break;
@@ -1952,6 +1999,11 @@ void app_main(void) {
     // without configuring anything. A user who deletes them keeps them deleted,
     // because their own channels will already have been stored.
     settings_apply_default_channels(&model);
+
+    // After the settings are loaded, because it adopts the device's current
+    // brightness only when none has been stored. The one and only read of
+    // either backlight level.
+    screen_power_init();
 
     if (!crypto_jobs_init()) ESP_LOGE(TAG, "public-key work will not run");
 

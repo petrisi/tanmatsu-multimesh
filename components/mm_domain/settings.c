@@ -303,6 +303,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  mt_custom_sf;
     uint8_t  mt_custom_cr;
     uint16_t mt_custom_bw;
+    uint8_t  brightness;
 } stored_config_t;
 
 // Offset of the first field a short record may be missing. Anything read at
@@ -329,6 +330,7 @@ void settings_save_config(const app_model_t* model) {
           .mt_custom_sf        = s->mt_custom.sf,
           .mt_custom_cr        = s->mt_custom.cr,
           .mt_custom_bw        = s->mt_custom.bw,
+          .brightness          = s->brightness,
     };
     write_blob(KEY_CONFIG, &stored, sizeof(stored));
 }
@@ -385,6 +387,13 @@ static void load_config(app_model_t* model) {
             if (s->mt_profile == MT_PROFILE_CUSTOM) s->mt_profile = MT_PROFILE_EFL_EU;
             mt_radio_resolve(s, &s->mt_custom);
         }
+
+        // Zero is meaningful here: it says nobody has chosen one yet, and start-up
+        // adopts whatever the device is already set to.
+        s->brightness = (stored.brightness == 0 || (stored.brightness >= SET_BRIGHTNESS_MIN &&
+                                                    stored.brightness <= SET_BRIGHTNESS_MAX))
+                            ? stored.brightness
+                            : SET_BRIGHTNESS_MAX;
     }
 
     // The active limit always starts from the stored default; a session that
