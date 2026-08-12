@@ -1,6 +1,6 @@
 # Application entry point and the event loop. Nothing else belongs here.
 idf_component_register(
-    SRCS "main.c"
+    SRCS "main.c" "sd_init.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         mm_crypto
@@ -15,4 +15,8 @@ idf_component_register(
         tanmatsu-wifi
         nvs_flash
         esp_lcd
+        fatfs
+        sdmmc
+        flite
+        cmu_us_kal
 )

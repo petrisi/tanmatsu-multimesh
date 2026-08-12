@@ -30,6 +30,7 @@ static uint32_t mesh_color    = 0;
 static uint32_t unread_color  = 0;
 static bool     unread        = false;
 static uint32_t activity_until = 0;
+static uint32_t alert_until    = 0;
 
 static uint32_t now_ms(void) {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -73,13 +74,15 @@ void leds_set_mesh(uint32_t argb) {
 }
 
 void leds_notify_message(uint32_t argb) {
-    unread_color = dim(argb, MESSAGE_DIVISOR);
+    unread_color = dim(0x00FF0000, MESSAGE_DIVISOR); // Always red for messages now
     unread       = true;
+    alert_until  = now_ms() + 5000;
 }
 
 void leds_clear_unread(void) {
     if (!unread) return;
     unread              = false;
+    alert_until         = 0;
     pixels[LED_MESSAGE] = 0;
     flush();
 }
@@ -91,10 +94,20 @@ void leds_notify_activity(void) {
 void leds_tick(void) {
     uint32_t t = now_ms();
 
-    pixels[LED_MESSAGE]  = (unread && ((t / BLINK_MS) & 1)) ? unread_color : 0;
-    pixels[LED_MESH]     = mesh_color;
-    pixels[LED_ACTIVITY] = (activity_until && t < activity_until) ? dim(0xFFFFFFFF, ACTIVITY_DIVISOR) : 0;
-    if (activity_until && t >= activity_until) activity_until = 0;
+    if (alert_until && t < alert_until) {
+        // Fast alternating red blink every 100ms
+        bool phase = (t / 100) & 1;
+        pixels[LED_MESSAGE]  = phase ? dim(0x00FF0000, MESSAGE_DIVISOR) : 0;
+        pixels[LED_ACTIVITY] = !phase ? dim(0x00FF0000, MESSAGE_DIVISOR) : 0;
+        pixels[LED_MESH]     = mesh_color;
+    } else {
+        if (alert_until && t >= alert_until) alert_until = 0;
+        
+        pixels[LED_MESSAGE]  = (unread && ((t / BLINK_MS) & 1)) ? unread_color : 0;
+        pixels[LED_MESH]     = mesh_color;
+        pixels[LED_ACTIVITY] = (activity_until && t < activity_until) ? dim(0xFFFFFFFF, ACTIVITY_DIVISOR) : 0;
+        if (activity_until && t >= activity_until) activity_until = 0;
+    }
 
     flush();
 }

@@ -643,6 +643,12 @@ static bool deliver(const mt_data_t* data, const mt_packet_t* packet, mesh_state
                         (unsigned long)packet->from, user.long_name, user.short_name, user.has_public_key ? 1u : 0u,
                         data->want_response ? 1u : 0u);
 
+            // The inspector logic will extract and log this later.
+            // We just let it fall through or return.
+            // Wait, since we need to pass the formatted string to the inspector, 
+            // how can we do it? We can store it in the view or extract it again later.
+            // But wait, the simplest way is to not push to model_push() here.
+
             // Answer a request with our own, which is the other half of the
             // exchange: without it the asker never learns our key and can never
             // send us anything private. Only when addressed to us -- a broadcast
@@ -668,6 +674,11 @@ static bool deliver(const mt_data_t* data, const mt_packet_t* packet, mesh_state
         bool matched = handle_routing(data, mesh);
         other_ports++;
         return matched;
+    }
+
+    if (data->portnum == MT_PORTNUM_POSITION) {
+        other_ports++;
+        return false;
     }
 
     if (data->portnum != MT_PORTNUM_TEXT_MESSAGE) {
@@ -707,7 +718,11 @@ static bool deliver(const mt_data_t* data, const mt_packet_t* packet, mesh_state
     msg->hops      = mt_hops_taken(packet);
     msg->hop_start = packet->hop_start;
     msg->hop_limit = packet->hop_limit;
-    if (packet->relay_node) snprintf(msg->relayed_by, sizeof(msg->relayed_by), "%02x", packet->relay_node);
+    if (packet->relay_node != (uint8_t)packet->from) {
+        snprintf(msg->relayed_by, sizeof(msg->relayed_by), "%02x", packet->relay_node);
+    } else {
+        msg->relayed_by[0] = '\0';
+    }
 
     text_msgs++;
     mesh->stats.messages++;
@@ -781,10 +796,15 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
     // carries a zero channel hash, which an unencrypted channel could otherwise
     // match by coincidence and then fail to parse.
     mt_data_t pki_data;
+    mt_data_t decoded_data;
+    bool has_decoded_data = false;
+    
     if (try_pki(&packet, mesh, identity, node, &pki_data)) {
         shown = deliver(&pki_data, &packet, mesh, node, pkt, (uint8_t)mesh->input_channel, true, duplicate, identity);
         view.decoded = true;
         view.portnum = pki_data.portnum;
+        decoded_data = pki_data;
+        has_decoded_data = true;
     } else {
         for (int i = 0; i < mesh->channel_count; i++) {
             const channel_t* ch = &mesh->channels[i];
@@ -810,6 +830,8 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
             shown = deliver(&data, &attempt, mesh, node, pkt, i, attempt.to == identity->node_num, duplicate, identity);
             view.decoded = true;
             view.portnum = data.portnum;
+            decoded_data = data;
+            has_decoded_data = true;
 
             // An acknowledgement or reply for somebody else's direct message
             // proves it arrived, so anything we were holding to forward is now
@@ -833,6 +855,77 @@ static bool meshtastic_handle(const lora_protocol_lora_packet_t* pkt, mesh_state
         // been relayed once, and relaying it again is what a mesh does to
         // itself when nobody counts.
         maybe_relay(&packet, pkt->data, pkt->length, snr, identity, &view);
+        
+        char sender_str[16];
+        if (node && node->named && node->short_name[0]) {
+            snprintf(sender_str, sizeof(sender_str), "%s", node->short_name);
+        } else {
+            snprintf(sender_str, sizeof(sender_str), "%04lx", (unsigned long)(packet.from & 0xFFFF));
+        }
+
+        packet_type_t ptype = PKT_UNKNOWN;
+        char info_str[64];
+        snprintf(info_str, sizeof(info_str), "%s", view.decoded ? "DEC" : "ENC");
+
+        if (view.decoded) {
+            switch (view.portnum) {
+                case MT_PORTNUM_TEXT_MESSAGE: 
+                    ptype = PKT_TEXT; 
+                    snprintf(info_str, sizeof(info_str), "MESSAGE");
+                    break;
+                case MT_PORTNUM_NODEINFO:     
+                    ptype = PKT_NODEINFO; 
+                    {
+                        mt_user_t user;
+                        if (has_decoded_data && mt_user_parse(decoded_data.payload, decoded_data.payload_length, &user)) {
+                            snprintf(info_str, sizeof(info_str), "%s (%s) HW:%d", user.long_name, user.short_name, user.hw_model);
+                        } else if (node && node->named) {
+                            snprintf(info_str, sizeof(info_str), "%s (%s) HW:%d", node->long_name, node->short_name, node->hw_model);
+                        } else {
+                            snprintf(info_str, sizeof(info_str), "NODEINFO");
+                        }
+                    }
+                    break;
+                case MT_PORTNUM_POSITION:     
+                    ptype = PKT_POSITION; 
+                    {
+                        mt_position_t pos;
+                        if (has_decoded_data && mt_position_parse(decoded_data.payload, decoded_data.payload_length, &pos)) {
+                            snprintf(info_str, sizeof(info_str), "LAT %.4f LON %.4f", (double)pos.latitude_i / 1e7, (double)pos.longitude_i / 1e7);
+                        } else {
+                            snprintf(info_str, sizeof(info_str), "POSITION");
+                        }
+                    }
+                    break;
+                case MT_PORTNUM_TELEMETRY:    
+                    ptype = PKT_TELEMETRY; 
+                    {
+                        mt_telemetry_t tel;
+                        if (has_decoded_data && mt_telemetry_parse(decoded_data.payload, decoded_data.payload_length, &tel)) {
+                            int pos = 0;
+                            if (tel.has_voltage) pos += snprintf(info_str + pos, sizeof(info_str) - pos, "%.2fV ", tel.voltage);
+                            if (tel.has_battery) pos += snprintf(info_str + pos, sizeof(info_str) - pos, "%lu%% ", tel.battery_level);
+                            if (tel.has_temperature) pos += snprintf(info_str + pos, sizeof(info_str) - pos, "%.1fc ", tel.temperature);
+                            if (tel.has_humidity) pos += snprintf(info_str + pos, sizeof(info_str) - pos, "%.1f%% ", tel.humidity);
+                            if (pos == 0) snprintf(info_str, sizeof(info_str), "TELEMETRY");
+                        } else {
+                            snprintf(info_str, sizeof(info_str), "TELEMETRY");
+                        }
+                    }
+                    break;
+                case MT_PORTNUM_TRACEROUTE_APP:
+                    ptype = PKT_TRACEROUTE;
+                    snprintf(info_str, sizeof(info_str), "TRACEROUTE");
+                    break;
+                default: break;
+            }
+        }
+
+        uint8_t relay_for_log = (packet.relay_node == (uint8_t)packet.from) ? 0 : packet.relay_node;
+        extern app_model_t model;
+        uint8_t start = packet.hop_start;
+        if (start == 0) start = packet.hop_limit > 3 ? 7 : 3;
+        model_push_packet(&model, ptype, sender_str, relay_for_log, snr, packet.hop_limit, start, info_str);
     }
 
     detail(mesh);
@@ -1046,6 +1139,19 @@ static uint8_t meshtastic_encode_advert(mesh_state_t* mesh, uint8_t channel, con
     return encode_frame(mesh, channel, identity, MT_PORTNUM_NODEINFO, body, body_len, UINT32_MAX, out, out_max);
 }
 
+static uint8_t meshtastic_encode_position(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, int32_t latitude, int32_t longitude,
+                                        uint8_t* out, size_t out_max) {
+    mt_position_t pos = {0};
+    pos.latitude_i = latitude * 10;
+    pos.longitude_i = longitude * 10;
+    
+    uint8_t body[MT_MAX_PAYLOAD_SIZE];
+    size_t  body_len = mt_position_encode(&pos, body, sizeof(body));
+    if (body_len == 0) return 0;
+
+    return encode_frame(mesh, channel, identity, MT_PORTNUM_POSITION, body, body_len, UINT32_MAX, out, out_max);
+}
+
 static const char* meshtastic_local_sender(const identity_t* identity) {
     // Meshtastic nodes are shown by short name; other clients will label us that
     // way once a NodeInfo goes out, so the echo should match rather than showing
@@ -1065,4 +1171,5 @@ const mesh_net_t mesh_net_meshtastic = {
     .encode          = meshtastic_encode,
     .encode_dm       = meshtastic_encode_dm,
     .encode_advert   = meshtastic_encode_advert,
+    .encode_position = meshtastic_encode_position,
 };

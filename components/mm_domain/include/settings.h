@@ -37,6 +37,9 @@ void settings_save_prefs(const app_model_t* model);
 // The configuration screen's contents. Loaded by settings_load() with the rest.
 void settings_save_config(const app_model_t* model);
 
+// Save the 10 most recent messages for a network.
+void settings_save_messages(int mesh_id, const mesh_state_t* mesh);
+
 // The channels a first run should start with: the well-known public channel on
 // MeshCore and EdgeFastLow on Meshtastic. Both use published keys -- neither is
 // a secret, and both are what their networks expect a new node to join.

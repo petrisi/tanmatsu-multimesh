@@ -285,6 +285,7 @@ typedef enum {
     OVERLAY_NODE_DETAIL,
     OVERLAY_NODE_SHORT,  // typing a short name for one node
     OVERLAY_SETTINGS,
+    OVERLAY_WATERFALL,
 } overlay_t;
 
 // What a pending confirmation will do if accepted.
@@ -363,7 +364,7 @@ typedef enum {
     MT_ROLE_CLIENT_MUTE = 1,  // hears everything, forwards nothing
 } mt_role_t;
 
-#define SET_HOPS_MAX_STORED  5  // what may be made permanent
+#define SET_HOPS_MAX_STORED  7  // what may be made permanent
 #define SET_HOPS_MAX_SESSION 7  // what the wire allows, reachable per session
 #define SET_DISPLAY_OFF_DEFAULT 5
 // Shorter than the screen, because the keys are lit for the moment you are
@@ -401,6 +402,9 @@ typedef struct {
     bool mt_optimize_text;
 
     bool mc_repeater;
+
+    bool speaker_enabled;
+    bool tts_enabled;
 } settings_t;
 
 // The fields the configuration screen offers. Which are visible depends on the
@@ -428,6 +432,27 @@ typedef enum {
 // that cannot happen. Hence the settings pointer -- visibility depends on the
 // current values, not only on which network is up.
 int settings_visible_fields(mesh_id_t active, const settings_t* settings, setting_field_t* out, int max);
+
+#define PACKET_LOG_MAX 20
+
+typedef enum {
+    PKT_TEXT,
+    PKT_NODEINFO,
+    PKT_POSITION,
+    PKT_TELEMETRY,
+    PKT_TRACEROUTE,
+    PKT_UNKNOWN
+} packet_type_t;
+
+typedef struct {
+    packet_type_t type;
+    char sender[NODE_NAME_MAX + 1];
+    char via_name[NODE_NAME_MAX + 1]; // Resolved name of the relay node
+    float snr;
+    uint8_t hop_limit;
+    uint8_t hop_start;
+    char info[120];
+} packet_log_entry_t;
 
 typedef struct {
     mesh_state_t mesh[MESH_COUNT];
@@ -482,16 +507,32 @@ typedef struct {
     // nothing about either. The count matters more than it looks: a node that
     // has been repeating all afternoon and relayed nothing is spending its
     // battery on an empty room, and there is no other way to tell.
-    uint32_t repeat_count[MESH_COUNT];
-    bool     repeat_busy;  // briefly true after each relay, so the badge blinks
+    uint32_t     repeat_count[MESH_COUNT];
+    bool         repeat_busy;  // briefly true after each relay, so the badge blinks
+
+    // Packet feed history
+    packet_log_entry_t packet_history[PACKET_LOG_MAX];
+    int packet_history_head;
 
     radio_state_t radio;
     int           battery_pct;
     bool          charging;
     bool          time_synced;
+    bool          show_packet_feed;
 
     char     toast[64];
     uint32_t toast_until_ms;
+
+#define WATERFALL_BINS 64
+#define WATERFALL_HISTORY 10
+
+    float    waterfall_data[WATERFALL_BINS];
+    float    waterfall_peaks[WATERFALL_BINS];
+    uint8_t  waterfall_history[WATERFALL_HISTORY][WATERFALL_BINS];
+    int      waterfall_history_head;
+
+    uint32_t waterfall_freq_start;
+    uint32_t waterfall_freq_end;
 } app_model_t;
 
 // Longest message each network can carry, in bytes of text.
@@ -536,6 +577,8 @@ void model_init(app_model_t* model);
 // arrives while the user is scrolled away, so the viewport can stay put.
 message_t* model_push(mesh_state_t* mesh, uint8_t channel, const char* sender, bool sender_named, const char* text,
                       bool outgoing);
+
+packet_log_entry_t* model_push_packet(app_model_t* app, packet_type_t type, const char* sender, uint8_t relay_node, float snr, uint8_t hop_limit, uint8_t hop_start, const char* info);
 
 // Ring access by position (0 = oldest held) or by sequence number. Both return
 // NULL rather than a stale slot when the message has aged out.

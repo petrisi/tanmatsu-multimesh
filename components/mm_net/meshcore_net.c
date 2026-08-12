@@ -1030,6 +1030,15 @@ static const char* meshcore_local_sender(const identity_t* identity) {
     return identity->name;
 }
 
+static uint8_t meshcore_encode_position(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, int32_t latitude, int32_t longitude, uint8_t* out,
+                                      size_t out_max) {
+    // Save the advert location so that meshcore_encode_advert uses it
+    advert_has_location = true;
+    advert_latitude = latitude;
+    advert_longitude = longitude;
+    return meshcore_encode_advert(mesh, channel, identity, out, out_max);
+}
+
 const mesh_net_t mesh_net_meshcore = {
     .name            = "MeshCore",
     .tag             = "MC",
@@ -1042,4 +1051,5 @@ const mesh_net_t mesh_net_meshcore = {
     .encode          = meshcore_encode,
     .encode_dm       = meshcore_encode_dm,
     .encode_advert   = meshcore_encode_advert,
+    .encode_position = meshcore_encode_position,
 };

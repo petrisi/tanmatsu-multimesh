@@ -71,6 +71,14 @@ static const char* channels_key(mesh_id_t mesh) {
     return mesh == MESH_MT ? KEY_CHANNELS_MT : KEY_CHANNELS_MC;
 }
 
+#define MAX_STORED_MESSAGES 30
+
+typedef struct __attribute__((packed)) {
+    uint8_t   version;
+    uint8_t   count;
+    message_t messages[MAX_STORED_MESSAGES];
+} stored_messages_t;
+
 static bool read_blob(const char* key, void* out, size_t expected) {
     if (!available) return false;
 
@@ -161,6 +169,31 @@ bool settings_load(app_model_t* model) {
 
     for (int i = 0; i < MESH_COUNT; i++) {
         if (load_channels(model, (mesh_id_t)i)) any = true;
+        
+        stored_messages_t* stored = malloc(sizeof(stored_messages_t));
+        if (stored) {
+            FILE* file = fopen(i == MESH_MT ? "/locfd/multimesh/msgs-mt.bin" : "/locfd/multimesh/msgs-mc.bin", "rb");
+            if (file) {
+                if (fread(stored, sizeof(stored_messages_t), 1, file) == 1 && stored->version == STORED_VERSION) {
+                    mesh_state_t* mesh = &model->mesh[i];
+                    int count = stored->count <= MAX_STORED_MESSAGES ? stored->count : MAX_STORED_MESSAGES;
+                    for(int j=0; j<count; j++) {
+                        mesh->messages[j] = stored->messages[j];
+                    }
+                    mesh->count = count;
+                    mesh->head = count % MAX_MESSAGES;
+                    
+                    uint32_t max_seq = 0;
+                    for(int j=0; j<count; j++) {
+                        if(mesh->messages[j].seq >= max_seq) max_seq = mesh->messages[j].seq + 1;
+                    }
+                    if (max_seq > mesh->next_seq) mesh->next_seq = max_seq;
+                    any = true;
+                }
+                fclose(file);
+            }
+            free(stored);
+        }
     }
 
     stored_identity_t identity;
@@ -251,6 +284,28 @@ void settings_save_config(const app_model_t* model) {
           .mt_optimize_text    = s->mt_optimize_text ? 1 : 0,
     };
     write_blob(KEY_CONFIG, &stored, sizeof(stored));
+}
+
+void settings_save_messages(int mesh_id, const mesh_state_t* mesh) {
+    stored_messages_t* stored = malloc(sizeof(stored_messages_t));
+    if (!stored) return;
+    stored->version = STORED_VERSION;
+    stored->count = 0;
+    int start = mesh->count > MAX_STORED_MESSAGES ? mesh->count - MAX_STORED_MESSAGES : 0;
+    
+    for (int i = start; i < mesh->count; i++) {
+        const message_t* msg = model_message_at(mesh, i);
+        if (msg && stored->count < MAX_STORED_MESSAGES) {
+            stored->messages[stored->count++] = *msg;
+        }
+    }
+    
+    FILE* file = fopen(mesh_id == MESH_MT ? "/locfd/multimesh/msgs-mt.bin" : "/locfd/multimesh/msgs-mc.bin", "wb");
+    if (file) {
+        fwrite(stored, sizeof(stored_messages_t), 1, file);
+        fclose(file);
+    }
+    free(stored);
 }
 
 static void load_config(app_model_t* model) {

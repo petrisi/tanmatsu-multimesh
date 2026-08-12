@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 #include "app_model.h"
+#include "settings.h"
 
 // Channel palette. Chosen to stay legible on the dark background and to remain
 // distinguishable from each other at a glance.
@@ -30,6 +31,7 @@ const pax_col_t ch_palette[CH_PALETTE_SIZE] = {CH_CYAN, CH_AMBER, CH_GREEN, CH_P
 
 void model_init(app_model_t* model) {
     memset(model, 0, sizeof(*model));
+    model->show_packet_feed = true;
 
     model->mesh[MESH_MC].name   = "MeshCore";
     model->mesh[MESH_MC].accent = MESH_MC_ACCENT;
@@ -51,6 +53,7 @@ void model_init(app_model_t* model) {
     model->settings.display_off_minutes = SET_DISPLAY_OFF_DEFAULT;
     model->settings.kbd_off_minutes     = SET_KBD_OFF_DEFAULT;
     model->settings.mt_default_hops     = 3;
+    model->settings.speaker_enabled     = true;
     // CLIENT_MUTE, because it is the one that is true: it says we do not relay
     // other people's traffic, and we do not. Advertising CLIENT would invite
     // neighbours to route through a node that silently drops everything.
@@ -102,6 +105,10 @@ message_t* model_push(mesh_state_t* mesh, uint8_t channel, const char* sender, b
     // A message arriving while the user is reading further up must not drag the
     // viewport; it is counted instead, and the UI offers a jump to the end.
     if (!outgoing && !mesh->pinned) mesh->unseen++;
+
+    // Save the message to persistent storage
+    int id = (mesh->name && mesh->name[4] == 'C') ? MESH_MC : MESH_MT;
+    settings_save_messages(id, mesh);
 
     return msg;
 }
@@ -311,4 +318,43 @@ const message_t* model_message_by_seq(const mesh_state_t* mesh, int32_t seq) {
         if (msg && msg->used && (int32_t)msg->seq == seq) return msg;
     }
     return NULL;
+}
+
+packet_log_entry_t* model_push_packet(app_model_t* app, packet_type_t type, const char* sender, uint8_t relay_node, float snr, uint8_t hop_limit, uint8_t hop_start, const char* info) {
+    if (!app) return NULL;
+    
+    packet_log_entry_t* entry = &app->packet_history[app->packet_history_head];
+    app->packet_history_head = (app->packet_history_head + 1) % PACKET_LOG_MAX;
+    
+    entry->type = type;
+    snprintf(entry->sender, sizeof(entry->sender), "%s", sender ? sender : "");
+    entry->snr = snr;
+    entry->hop_limit = hop_limit;
+    entry->hop_start = hop_start;
+    snprintf(entry->info, sizeof(entry->info), "%s", info ? info : "");
+    entry->via_name[0] = '\0';
+    
+    if (relay_node != 0 && relay_node != 0xff && relay_node != 255) {
+        mesh_state_t* mesh = &app->mesh[MESH_MT];
+        for (int i = 0; i < MAX_NODES; i++) {
+            if (mesh->nodes[i].used && (mesh->nodes[i].node_num & 0xFF) == relay_node) {
+                if (mesh->nodes[i].short_name[0]) {
+                    snprintf(entry->via_name, sizeof(entry->via_name), "%s", mesh->nodes[i].short_name);
+                } else if (mesh->nodes[i].long_name[0]) {
+                    snprintf(entry->via_name, sizeof(entry->via_name), "%s", mesh->nodes[i].long_name);
+                } else {
+                    snprintf(entry->via_name, sizeof(entry->via_name), "!%08lx", (unsigned long)mesh->nodes[i].node_num);
+                }
+                break;
+            }
+        }
+        if (entry->via_name[0] == '\0') {
+            snprintf(entry->via_name, sizeof(entry->via_name), "0x%02x", relay_node);
+        }
+    }
+    
+    if (strcmp(entry->via_name, entry->sender) == 0) {
+        entry->via_name[0] = '\0';
+    }
+    return entry;
 }

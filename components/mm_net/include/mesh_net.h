@@ -78,16 +78,15 @@ typedef struct mesh_net_s {
     bool (*take_pending_ack)(uint8_t* out, size_t out_max, uint8_t* out_len);
 
     // Build the frame that announces us to the network. Both networks have the
-    // concept and neither builds it the same way -- Meshtastic sends an
-    // unsigned NodeInfo on a channel, MeshCore an Ed25519-signed advert that
-    // belongs to no channel -- so the whole construction lives behind this hook
-    // rather than being assembled by the caller.
-    //
+    // concept of a semi-regular presence broadcast in addition to normal traffic.
     // `channel` is where the announcement goes on networks that scope it to one;
-    // MeshCore ignores it.
-    //
+    // ignored on networks where all metadata goes to the primary channel.
     // Returns the frame length, or 0 when we have nothing to announce with.
     uint8_t (*encode_advert)(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, uint8_t* out,
+                             size_t out_max);
+
+    // Build the frame that announces our position to the network.
+    uint8_t (*encode_position)(mesh_state_t* mesh, uint8_t channel, const identity_t* identity, int32_t latitude, int32_t longitude, uint8_t* out,
                              size_t out_max);
 } mesh_net_t;
 

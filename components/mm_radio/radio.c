@@ -4,6 +4,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "wifi_connection.h"
@@ -16,6 +17,7 @@ static const char TAG[] = "radio";
 
 static lora_handle_t handle;
 static bool          ready = false;
+static lora_protocol_config_params_t scan_saved_config;
 static char          firmware_version[24] = "";
 
 bool radio_is_ready(void) {
@@ -120,6 +122,36 @@ static bool channel_is_clear(void) {
         return true;
     }
     return rssi < LBT_BUSY_DBM;
+}
+
+// --- Spectrum Scanner ---
+
+void radio_scan_start(void) {
+    if (!ready) return;
+    lora_get_config(&handle, &scan_saved_config);
+    lora_set_mode(&handle, LORA_PROTOCOL_MODE_STANDBY_XOSC);
+}
+
+float radio_scan_measure(uint32_t freq_hz) {
+    if (!ready) return -140.0f;
+    lora_protocol_config_params_t new_config = scan_saved_config;
+    new_config.frequency = freq_hz;
+    
+    lora_set_mode(&handle, LORA_PROTOCOL_MODE_STANDBY_XOSC);
+    lora_set_config(&handle, &new_config);
+    lora_set_mode(&handle, LORA_PROTOCOL_MODE_RX);
+    
+    esp_rom_delay_us(500); // let it settle
+    float rssi = -140.0f;
+    lora_get_rssi_inst(&handle, &rssi);
+    return rssi;
+}
+
+void radio_scan_stop(void) {
+    if (!ready) return;
+    lora_set_mode(&handle, LORA_PROTOCOL_MODE_STANDBY_XOSC);
+    lora_set_config(&handle, &scan_saved_config);
+    lora_set_mode(&handle, LORA_PROTOCOL_MODE_RX);
 }
 
 bool radio_send(const uint8_t* data, uint8_t length) {

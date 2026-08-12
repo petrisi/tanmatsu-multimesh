@@ -18,6 +18,7 @@ if (-not $env:IDF_PATH) { throw "ESP-IDF activation failed" }
 
 Push-Location $root
 try {
+    $env:PYTHONIOENCODING="utf-8"
     idf.py `
         -B build/tanmatsu `
         -DSDKCONFIG_DEFAULTS="sdkconfigs/general;sdkconfigs/tanmatsu" `

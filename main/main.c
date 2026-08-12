@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include "app_model.h"
+#include "audio.h"
 #include "bsp/device.h"
 #include "bsp/display.h"
 #include "bsp/input.h"
@@ -37,10 +38,12 @@
 #include "settings.h"
 #include "ui.h"
 #include "x25519.h"
-
+#include "tanmatsu_coprocessor.h"
+#include "bsp/tanmatsu.h"
+#include "sd_init.h"
 static const char TAG[] = "main";
 
-static app_model_t   model;
+app_model_t   model;
 static QueueHandle_t input_event_queue = NULL;
 
 // The networks, in the order the switch key cycles them.
@@ -740,6 +743,13 @@ static bool radio_poll(void) {
             const message_t* newest = model_message_at(mesh, mesh->count - 1);
             if (newest && newest->channel < mesh->channel_count) {
                 leds_notify_message(mesh->channels[newest->channel].color);
+                if (model.settings.tts_enabled) {
+                    char tts_buf[256];
+                    snprintf(tts_buf, sizeof(tts_buf), "Message from %s. %s", newest->sender, newest->text);
+                    audio_play_tts(tts_buf);
+                } else if (model.settings.speaker_enabled) {
+                    audio_play_notification();
+                }
             }
         } else {
             // Heard something, but not a message for us: position, telemetry,
@@ -1060,6 +1070,43 @@ static void handle_identity_key(bsp_input_navigation_key_t key) {
 
 // --- nodes ---------------------------------------------------------------
 
+static bool send_position(bool manual) {
+    if (!radio_is_ready()) {
+        if (manual) toast("radio unavailable");
+        return false;
+    }
+    if (!identity_is_set(&model.identity)) {
+        if (manual) toast("set a name first");
+        return false;
+    }
+    if (model.active == MESH_MC && !model.identity.has_keypair) {
+        if (manual) toast("no signing key - cannot advertise");
+        return false;
+    }
+
+    mesh_state_t* mesh = model_active(&model);
+    if (mesh->channel_count == 0) return false;
+    const channel_t* ch = &mesh->channels[mesh->input_channel];
+    if (!ch->ready) return false;
+
+    tx_request_t request = {.mesh = model.active, .seq = UINT32_MAX};  // no message row to track
+    request.length       = nets[model.active]->encode_position(mesh, (uint8_t)mesh->input_channel, &model.identity,
+                                                              model.settings.latitude, model.settings.longitude,
+                                                              request.frame, sizeof(request.frame));
+    if (request.length == 0) {
+        if (manual) toast("could not build position");
+        return false;
+    }
+
+    if (xQueueSend(tx_requests, &request, 0) != pdTRUE) {
+        if (manual) toast("transmit queue full");
+        return false;
+    }
+
+    if (manual) toast("position sent");
+    return true;
+}
+
 // Build and queue our own announcement for the active network: a NodeInfo on
 // Meshtastic, a signed advert on MeshCore. Each stack knows how to construct
 // its own; all that happens here is the queueing.
@@ -1122,12 +1169,7 @@ static void handle_nodes_key(bsp_input_navigation_key_t key) {
             if (model_node_by_slot(mesh, model.node_slot)) model.overlay = OVERLAY_NODE_DETAIL;
             break;
         case BSP_INPUT_NAVIGATION_KEY_F2:  // announce
-            if (now_ms() - model.last_advert_ms < ADVERT_COOLDOWN_MS && model.last_advert_ms != 0) {
-                uint32_t left = (ADVERT_COOLDOWN_MS - (now_ms() - model.last_advert_ms)) / 1000;
-                toast("wait %lus before announcing again", (unsigned long)left);
-            } else {
-                send_announcement(true);
-            }
+            send_position(true);
             break;
         case BSP_INPUT_NAVIGATION_KEY_F3:  // clear all
             if (count == 0) {
@@ -1618,6 +1660,11 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
         case OVERLAY_NODE_DETAIL: handle_node_detail_key(key); return;
         case OVERLAY_NODE_SHORT: handle_node_short_key(key); return;
         case OVERLAY_SETTINGS: handle_settings_key(key); return;
+        case OVERLAY_WATERFALL:
+            if (key == BSP_INPUT_NAVIGATION_KEY_ESC || key == BSP_INPUT_NAVIGATION_KEY_VOLUME_UP) {
+                model.overlay = OVERLAY_NONE;
+            }
+            return;
         case OVERLAY_DETAIL:
             if (key == BSP_INPUT_NAVIGATION_KEY_ESC || key == BSP_INPUT_NAVIGATION_KEY_F1 ||
                 key == BSP_INPUT_NAVIGATION_KEY_RETURN) {
@@ -1648,15 +1695,7 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
 
     mesh_state_t* mesh = model_active(&model);
 
-    // Selection mode owns the arrow keys it uses, but leaves the rest alone.
-    if (alt && key == BSP_INPUT_NAVIGATION_KEY_UP) {
-        selection_move(-1);
-        return;
-    }
-    if (alt && key == BSP_INPUT_NAVIGATION_KEY_DOWN) {
-        selection_move(1);
-        return;
-    }
+    // The arrow keys are used for message selection by default.
     if (mesh->selected_seq >= 0) {
         if (key == BSP_INPUT_NAVIGATION_KEY_RETURN) {
             model.overlay = OVERLAY_DETAIL;
@@ -1669,11 +1708,7 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
     }
 
     switch (key) {
-        case BSP_INPUT_NAVIGATION_KEY_F1:  // red cross
-            // Escalating escape: clear what you typed, then leave the
-            // conversation, then leave the app. Each step is the smallest thing
-            // the key could plausibly mean at that moment, and the shortcut bar
-            // relabels itself so it is never a guess.
+        case BSP_INPUT_NAVIGATION_KEY_ESC:
             if (model.composer_len > 0) {
                 composer_set("");
                 toast("cleared");
@@ -1686,26 +1721,20 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
             }
             break;
 
+        case BSP_INPUT_NAVIGATION_KEY_F1:  // red cross
+            if (model.composer_len > 0) {
+                composer_set("");
+                toast("cleared");
+            } else if (leave_conversation()) {
+                // done
+            } else {
+                model.show_packet_feed = !model.show_packet_feed;
+            }
+            break;
+
         case BSP_INPUT_NAVIGATION_KEY_F2: switch_mesh(); break;
         case BSP_INPUT_NAVIGATION_KEY_F3:
-            // fn turns this into the diagnostic recorder. A modifier rather than
-            // a menu entry on purpose: it is for reproducing a fault on request,
-            // not something to switch on by wandering into it.
-            if (fn) {
-                if (session_log_toggle()) {
-                    toast("recording session");
-                } else {
-                    uint32_t lost = session_log_dropped();
-                    if (lost) {
-                        toast("stopped - %lu lines lost", (unsigned long)lost);
-                    } else {
-                        toast("stopped - %lu bytes", (unsigned long)session_log_bytes());
-                    }
-                }
-            } else {
-                model.show_meta = !model.show_meta;
-                settings_save_prefs(&model);
-            }
+            send_announcement(true);
             break;
         case BSP_INPUT_NAVIGATION_KEY_F4:
             model.overlay    = OVERLAY_NODES;
@@ -1732,12 +1761,12 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
             }
             break;
 
+        case BSP_INPUT_NAVIGATION_KEY_VOLUME_UP: model.overlay = OVERLAY_WATERFALL; break;
         case BSP_INPUT_NAVIGATION_KEY_VOLUME_DOWN: settings_open(); break;
 
         case BSP_INPUT_NAVIGATION_KEY_TAB: next_channel(1); break;
         case BSP_INPUT_NAVIGATION_KEY_RETURN: composer_send(); break;
         case BSP_INPUT_NAVIGATION_KEY_BACKSPACE: composer_backspace(); break;
-        case BSP_INPUT_NAVIGATION_KEY_ESC: composer_set(""); break;
 
         case BSP_INPUT_NAVIGATION_KEY_LEFT: composer_move(-1); break;
         case BSP_INPUT_NAVIGATION_KEY_RIGHT: composer_move(1); break;
@@ -1747,8 +1776,10 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
                 history_browse(-1);
             } else if (fn) {
                 scroll_by(-ui_visible_rows());
-            } else {
+            } else if (alt) {
                 scroll_by(-1);
+            } else {
+                selection_move(-1);
             }
             break;
 
@@ -1757,8 +1788,10 @@ static void handle_navigation(bsp_input_navigation_key_t key, uint32_t modifiers
                 history_browse(1);
             } else if (fn) {
                 jump_to_latest();
-            } else {
+            } else if (alt) {
                 scroll_by(1);
+            } else {
+                selection_move(1);
             }
             break;
 
@@ -1798,6 +1831,13 @@ void app_main(void) {
         return;
     }
 
+    tanmatsu_coprocessor_handle_t coprocessor_handle = NULL;
+    bsp_tanmatsu_coprocessor_get_handle(&coprocessor_handle);
+
+    tanmatsu_coprocessor_set_amplifier_force(coprocessor_handle, true);
+    tanmatsu_coprocessor_set_amplifier_enable(coprocessor_handle, true);
+
+
     if (!ui_init()) {
         ESP_LOGE(TAG, "no display, nothing to prototype");
         return;
@@ -1811,11 +1851,16 @@ void app_main(void) {
     // clock so the timestamp column shows something meaningful.
     struct timeval tv = {.tv_sec = 1785000000, .tv_usec = 0};
     settimeofday(&tv, NULL);
-
+    
+    // sdcard_init();
+    
     model_init(&model);
     settings_derive_node_id(&model.identity);
 
     settings_init();
+    if (!nodestore_init()) {
+        ESP_LOGE(TAG, "nodestore_init failed");
+    }
     settings_load(&model);
     // Defaults fill only what storage did not: the well-known public channel on
     // MeshCore and EdgeFastLow on Meshtastic, so a fresh device is on the air
@@ -1876,21 +1921,22 @@ void app_main(void) {
 
     session_log_init();
 
-    if (nodestore_init()) {
-        nodestore_load(&model);
+    nodestore_load(&model);
 
-        // Routes recorded before we widened our hops are ambiguous: one byte of
-        // a repeater's key names several repeaters. Dropping them costs one
-        // flooded message each to re-learn at the width we now use, and that
-        // flood happens by itself the next time anyone is messaged.
-        int narrow = model_drop_narrow_routes(&model.mesh[MESH_MC], MC_PATH_HASH_SIZE_OURS);
-        if (narrow > 0) {
-            ESP_LOGI(TAG, "dropped %d route(s) narrower than %d bytes per hop", narrow, MC_PATH_HASH_SIZE_OURS);
-            nodestore_mark_dirty(MESH_MC);
-        }
+    // Routes recorded before we widened our hops are ambiguous: one byte of
+    // a repeater's key names several repeaters. Dropping them costs one
+    // flooded message each to re-learn at the width we now use, and that
+    // flood happens by itself the next time anyone is messaged.
+    int narrow = model_drop_narrow_routes(&model.mesh[MESH_MC], MC_PATH_HASH_SIZE_OURS);
+    if (narrow > 0) {
+        ESP_LOGI(TAG, "dropped %d route(s) narrower than %d bytes per hop", narrow, MC_PATH_HASH_SIZE_OURS);
+        nodestore_mark_dirty(MESH_MC);
     } else {
         ESP_LOGW(TAG, "nodes will not persist this session");
     }
+
+    void mm_tts_init(void);
+    mm_tts_init();
 
     leds_init();
     leds_set_mesh(model_active(&model)->led);
@@ -1942,7 +1988,8 @@ void app_main(void) {
         bsp_input_event_t event;
         bool              dirty = false;
 
-        if (xQueueReceive(input_event_queue, &event, pdMS_TO_TICKS(120)) == pdTRUE) {
+        int wait_ms = (model.overlay == OVERLAY_WATERFALL) ? 0 : 120;
+        if (xQueueReceive(input_event_queue, &event, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
             // Any press while the screen is dark only turns it back on. It is
             // swallowed rather than acted on: reaching for the light should not
             // also type a character or switch networks.
@@ -1966,6 +2013,30 @@ void app_main(void) {
                     break;
 
                 case INPUT_EVENT_TYPE_KEYBOARD:
+                    // Ctrl+S toggles the speaker notification sound
+                    if ((event.args_keyboard.modifiers & BSP_INPUT_MODIFIER_CTRL) &&
+                        (event.args_keyboard.utf8[0] == 's' || event.args_keyboard.utf8[0] == 'S') &&
+                        event.args_keyboard.utf8[1] == '\0') {
+                        model.settings.speaker_enabled = !model.settings.speaker_enabled;
+                        toast("SPEAKER %s", model.settings.speaker_enabled ? "ON" : "OFF");
+                        if (model.settings.speaker_enabled) {
+                            audio_play_notification();
+                        }
+                        dirty = true;
+                        break;
+                    }
+                    // Ctrl+T, Ctrl+P, or Ctrl+A toggles TTS (added P and A due to hardware ghosting on T)
+                    if ((event.args_keyboard.modifiers & BSP_INPUT_MODIFIER_CTRL) &&
+                        (event.args_keyboard.utf8[0] == 't' || event.args_keyboard.utf8[0] == 'T' ||
+                         event.args_keyboard.utf8[0] == 'p' || event.args_keyboard.utf8[0] == 'P' ||
+                         event.args_keyboard.utf8[0] == 'a' || event.args_keyboard.utf8[0] == 'A') &&
+                        event.args_keyboard.utf8[1] == '\0') {
+                        model.settings.tts_enabled = !model.settings.tts_enabled;
+                        toast("TTS %s", model.settings.tts_enabled ? "ON" : "OFF");
+                        dirty = true;
+                        break;
+                    }
+
                     // fn plus a digit sets the hop limit for this session only.
                     // It reaches past the stored maximum on purpose: a limit
                     // worth raising to get one message out is not one worth
@@ -2019,14 +2090,67 @@ void app_main(void) {
     woke:
         screen_tick();
 
-        if (radio_poll()) dirty = true;
-        if (drain_tx_events()) dirty = true;
-        if (drain_crypto()) dirty = true;
-        forward_acks();
-        forward_repeats();
+        static overlay_t previous_overlay = OVERLAY_NONE;
+        if (model.overlay != previous_overlay) {
+            if (model.overlay == OVERLAY_WATERFALL) {
+                radio_scan_start();
+                model.waterfall_freq_start = 869250000;
+                model.waterfall_freq_end   = 869750000;
+                for (int i = 0; i < WATERFALL_BINS; i++) {
+                    model.waterfall_data[i] = -140.0f;
+                    model.waterfall_peaks[i] = -140.0f;
+                }
+                memset(model.waterfall_history, 0, sizeof(model.waterfall_history));
+                model.waterfall_history_head = 0;
+            } else if (previous_overlay == OVERLAY_WATERFALL) {
+                radio_scan_stop();
+            }
+            previous_overlay = model.overlay;
+            dirty = true;
+        }
+
+        if (model.overlay == OVERLAY_WATERFALL) {
+            static int scan_index = 0;
+            float step = (model.waterfall_freq_end - model.waterfall_freq_start) / (float)WATERFALL_BINS;
+            
+            for (int i = 0; i < 8; i++) { // Scan 8 bins per frame
+                uint32_t freq = model.waterfall_freq_start + (uint32_t)(scan_index * step);
+                float rssi = radio_scan_measure(freq);
+                model.waterfall_data[scan_index] = rssi;
+                
+                if (rssi > model.waterfall_peaks[scan_index]) {
+                    model.waterfall_peaks[scan_index] = rssi;
+                } else {
+                    model.waterfall_peaks[scan_index] -= 0.5f; // peak hold decay
+                    if (model.waterfall_peaks[scan_index] < -140.0f) model.waterfall_peaks[scan_index] = -140.0f;
+                }
+                
+                scan_index++;
+                if (scan_index >= WATERFALL_BINS) {
+                    scan_index = 0;
+                    model.waterfall_history_head = (model.waterfall_history_head - 1 + WATERFALL_HISTORY) % WATERFALL_HISTORY;
+                    for (int b = 0; b < WATERFALL_BINS; b++) {
+                        float v = model.waterfall_data[b];
+                        if (v < -140.0f) v = -140.0f;
+                        if (v > -30.0f) v = -30.0f;
+                        uint8_t c = (uint8_t)(((v + 140.0f) / 110.0f) * 255.0f);
+                        model.waterfall_history[model.waterfall_history_head][b] = c;
+                    }
+                }
+            }
+            
+            dirty = true; // fast update
+        } else {
+            if (radio_poll()) dirty = true;
+            if (drain_tx_events()) dirty = true;
+            if (drain_crypto()) dirty = true;
+            forward_acks();
+            forward_repeats();
+            if (tx_settle()) dirty = true;
+        }
+
         if (poll_power()) dirty = true;
         if (housekeeping()) dirty = true;
-        if (tx_settle()) dirty = true;
         leds_tick();
 
         if (model.toast[0] && (int32_t)(now_ms() - model.toast_until_ms) >= 0) {

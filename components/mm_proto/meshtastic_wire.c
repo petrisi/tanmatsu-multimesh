@@ -33,9 +33,13 @@ bool mt_packet_parse(const uint8_t* data, uint8_t size, mt_packet_t* out) {
 }
 
 uint8_t mt_hops_taken(const mt_packet_t* pkt) {
-    if (pkt == NULL || pkt->hop_start == 0) return 0;
-    if (pkt->hop_limit > pkt->hop_start) return 0;  // malformed; do not underflow
-    return pkt->hop_start - pkt->hop_limit;
+    if (pkt == NULL) return 0;
+    uint8_t start = pkt->hop_start;
+    if (start == 0) {
+        start = pkt->hop_limit > 3 ? 7 : 3;
+    }
+    if (pkt->hop_limit > start) return 0;  // malformed; do not underflow
+    return start - pkt->hop_limit;
 }
 
 // Read a base-128 varint. Returns false on truncation or an implausibly long
@@ -471,4 +475,187 @@ const char* mt_portnum_name(uint32_t portnum) {
         case MT_PORTNUM_TELEMETRY: return "telem";
         default: return "other";
     }
+}
+
+static bool skip_field(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire) {
+    switch (wire) {
+        case 0: { uint64_t v; return read_varint(buf, len, pos, &v); }
+        case 1: if (*pos + 8 > len) return false; *pos += 8; return true;
+        case 2: { uint64_t v; if (!read_varint(buf, len, pos, &v)) return false; if (*pos + v > len) return false; *pos += (size_t)v; return true; }
+        case 5: if (*pos + 4 > len) return false; *pos += 4; return true;
+        default: return false;
+    }
+}
+
+bool mt_position_parse(const uint8_t* buf, size_t len, mt_position_t* out) {
+    if (buf == NULL || out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    size_t pos = 0;
+    while (pos < len) {
+        uint64_t key;
+        if (!read_varint(buf, len, &pos, &key)) return false;
+        uint32_t field = (uint32_t)(key >> 3);
+        uint8_t wire = (uint8_t)(key & 0x07);
+        if (field == 1 && wire == 5) {
+            if (pos + 4 > len) return false;
+            uint32_t v = (uint32_t)buf[pos] | ((uint32_t)buf[pos+1] << 8) | ((uint32_t)buf[pos+2] << 16) | ((uint32_t)buf[pos+3] << 24);
+            out->latitude_i = (int32_t)v;
+            pos += 4;
+        } else if (field == 2 && wire == 5) {
+            if (pos + 4 > len) return false;
+            uint32_t v = (uint32_t)buf[pos] | ((uint32_t)buf[pos+1] << 8) | ((uint32_t)buf[pos+2] << 16) | ((uint32_t)buf[pos+3] << 24);
+            out->longitude_i = (int32_t)v;
+            pos += 4;
+        } else if (field == 3 && wire == 0) {
+            uint64_t v;
+            if (!read_varint(buf, len, &pos, &v)) return false;
+            out->altitude = (int32_t)v;
+        } else {
+            if (!skip_field(buf, len, &pos, wire)) return false;
+        }
+    }
+    return true;
+}
+
+size_t mt_position_encode(const mt_position_t* pos, uint8_t* out, size_t out_max) {
+    if (!out) return 0;
+    size_t len = 0;
+    
+    // field 1, wire 5 (fixed32)
+    if (pos->latitude_i != 0) {
+        if (len + 5 > out_max) return 0;
+        out[len++] = 0x0D; // (1 << 3) | 5
+        uint32_t lat = (uint32_t)pos->latitude_i;
+        out[len++] = (uint8_t)(lat);
+        out[len++] = (uint8_t)(lat >> 8);
+        out[len++] = (uint8_t)(lat >> 16);
+        out[len++] = (uint8_t)(lat >> 24);
+    }
+    
+    // field 2, wire 5 (fixed32)
+    if (pos->longitude_i != 0) {
+        if (len + 5 > out_max) return 0;
+        out[len++] = 0x15; // (2 << 3) | 5
+        uint32_t lon = (uint32_t)pos->longitude_i;
+        out[len++] = (uint8_t)(lon);
+        out[len++] = (uint8_t)(lon >> 8);
+        out[len++] = (uint8_t)(lon >> 16);
+        out[len++] = (uint8_t)(lon >> 24);
+    }
+    
+    // field 3, wire 0 (varint)
+    if (pos->altitude != 0) {
+        size_t written = write_varint(&out[len], out_max - len, (3 << 3) | 0);
+        if (!written) return 0;
+        len += written;
+        written = write_varint(&out[len], out_max - len, (uint64_t)(int64_t)pos->altitude);
+        if (!written) return 0;
+        len += written;
+    }
+    
+    return len;
+}
+
+bool mt_telemetry_parse(const uint8_t* buf, size_t len, mt_telemetry_t* out) {
+    if (buf == NULL || out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    size_t pos = 0;
+    while (pos < len) {
+        uint64_t key;
+        if (!read_varint(buf, len, &pos, &key)) return false;
+        uint32_t field = (uint32_t)(key >> 3);
+        uint8_t wire = (uint8_t)(key & 0x07);
+        
+        if (wire == 2 && (field == 2 || field == 3)) {
+            uint64_t mlen;
+            if (!read_varint(buf, len, &pos, &mlen)) return false;
+            size_t end = pos + (size_t)mlen;
+            if (end > len) return false;
+            
+            while (pos < end) {
+                uint64_t mkey;
+                if (!read_varint(buf, len, &pos, &mkey)) break;
+                uint32_t mfield = (uint32_t)(mkey >> 3);
+                uint8_t mwire = (uint8_t)(mkey & 0x07);
+                
+                if (field == 2) {
+                    if (mfield == 1 && mwire == 0) {
+                        uint64_t v; read_varint(buf, len, &pos, &v);
+                        out->battery_level = (uint32_t)v;
+                        out->has_battery = true;
+                    } else if (mfield == 2 && mwire == 5) {
+                        if (pos + 4 <= len) {
+                            uint32_t v = (uint32_t)buf[pos] | ((uint32_t)buf[pos+1] << 8) | ((uint32_t)buf[pos+2] << 16) | ((uint32_t)buf[pos+3] << 24);
+                            memcpy(&out->voltage, &v, 4);
+                            out->has_voltage = true;
+                        }
+                        pos += 4;
+                    } else {
+                        skip_field(buf, len, &pos, mwire);
+                    }
+                } else if (field == 3) {
+                    if (mfield == 1 && mwire == 5) {
+                        if (pos + 4 <= len) {
+                            uint32_t v = (uint32_t)buf[pos] | ((uint32_t)buf[pos+1] << 8) | ((uint32_t)buf[pos+2] << 16) | ((uint32_t)buf[pos+3] << 24);
+                            memcpy(&out->temperature, &v, 4);
+                            out->has_temperature = true;
+                        }
+                        pos += 4;
+                    } else if (mfield == 2 && mwire == 5) {
+                        if (pos + 4 <= len) {
+                            uint32_t v = (uint32_t)buf[pos] | ((uint32_t)buf[pos+1] << 8) | ((uint32_t)buf[pos+2] << 16) | ((uint32_t)buf[pos+3] << 24);
+                            memcpy(&out->humidity, &v, 4);
+                            out->has_humidity = true;
+                        }
+                        pos += 4;
+                    } else if (mfield == 3 && mwire == 5) {
+                        if (pos + 4 <= len) {
+                            uint32_t v = (uint32_t)buf[pos] | ((uint32_t)buf[pos+1] << 8) | ((uint32_t)buf[pos+2] << 16) | ((uint32_t)buf[pos+3] << 24);
+                            memcpy(&out->baro, &v, 4);
+                            out->has_baro = true;
+                        }
+                        pos += 4;
+                    } else {
+                        skip_field(buf, len, &pos, mwire);
+                    }
+                }
+            }
+            pos = end;
+        } else {
+            if (!skip_field(buf, len, &pos, wire)) return false;
+        }
+    }
+    return true;
+}
+
+bool mt_route_parse(const uint8_t* buf, size_t len, mt_route_t* out) {
+    if (buf == NULL || out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    size_t pos = 0;
+    while (pos < len) {
+        uint64_t key;
+        if (!read_varint(buf, len, &pos, &key)) return false;
+        uint32_t field = (uint32_t)(key >> 3);
+        uint8_t wire = (uint8_t)(key & 0x07);
+        if (field == 1 && wire == 2) {
+            uint64_t rlen;
+            if (!read_varint(buf, len, &pos, &rlen)) return false;
+            size_t end = pos + (size_t)rlen;
+            while (pos < end && pos + 4 <= len && out->route_len < 10) {
+                uint32_t v = (uint32_t)buf[pos] | ((uint32_t)buf[pos+1] << 8) | ((uint32_t)buf[pos+2] << 16) | ((uint32_t)buf[pos+3] << 24);
+                out->route[out->route_len++] = v;
+                pos += 4;
+            }
+            pos = end;
+        } else if (field == 1 && wire == 5) {
+            if (pos + 4 <= len && out->route_len < 10) {
+                uint32_t v = (uint32_t)buf[pos] | ((uint32_t)buf[pos+1] << 8) | ((uint32_t)buf[pos+2] << 16) | ((uint32_t)buf[pos+3] << 24);
+                out->route[out->route_len++] = v;
+            }
+            pos += 4;
+        } else {
+            if (!skip_field(buf, len, &pos, wire)) return false;
+        }
+    }
+    return true;
 }

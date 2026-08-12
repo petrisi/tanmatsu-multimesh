@@ -295,11 +295,12 @@ static float x_from(const app_model_t* model) {
     return x_chan() + (chan_cells(model) + 1) * CHAR_W;
 }
 static float x_text(const app_model_t* model) {
-    return x_from(model) + (COL_FROM_CELLS + 1) * CHAR_W;
+    return 12;
 }
 
 static int text_room(const app_model_t* model) {
-    float right = model->show_meta ? ui_w - 10 - (COL_META_CELLS + 1) * CHAR_W : ui_w - 10;
+    float screen_w = (model->active == MESH_MT && model->show_packet_feed) ? (ui_w / 2.0f) : ui_w;
+    float right = screen_w - 10;
     int   room  = (int)((right - x_text(model)) / CHAR_W);
     return room > 4 ? room : 4;
 }
@@ -355,6 +356,14 @@ static void wrap_message(int msg_index, const char* text, int room) {
     int pos   = 0;
     int count = 0;
 
+    if (line_total < (int)(sizeof(lines) / sizeof(lines[0]))) {
+        lines[line_total++] = (line_t){.msg   = (int16_t)msg_index,
+                                       .start = 0,
+                                       .len   = 0,
+                                       .first = true};
+    }
+    count++;
+
     while (count < MAX_LINES_PER_MSG) {
         int scan = pos, cells = 0, last_space = -1;
         while (text[scan] && cells < room) {
@@ -371,7 +380,7 @@ static void wrap_message(int msg_index, const char* text, int room) {
             lines[line_total++] = (line_t){.msg   = (int16_t)msg_index,
                                            .start = (int16_t)pos,
                                            .len   = (int16_t)(end - pos),
-                                           .first = (count == 0)};
+                                           .first = false};
         }
         count++;
 
@@ -648,24 +657,48 @@ static void draw_time_cell(const app_model_t* model, const message_t* msg, float
 static void draw_empty_state(const app_model_t* model) {
     const mesh_state_t* mesh = &model->mesh[model->active];
     char                line[64];
-    snprintf(line, sizeof(line), "No messages yet on %s", mesh->name);
+    float screen_w = (model->active == MESH_MT && model->show_packet_feed) ? (ui_w / 2.0f) : ui_w;
+    
+    if (model->active == MESH_MT) {
+        snprintf(line, sizeof(line), "No msgs on %s", mesh->name);
+    } else {
+        snprintf(line, sizeof(line), "No messages yet on %s", mesh->name);
+    }
+    
     float w = (float)strlen(line) * CHAR_W;
-    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, (ui_w - w) / 2, (MSG_TOP + msg_bottom) / 2 - LINE_H, line);
+    float x = (screen_w - w) / 2;
+    if (x < 0) x = 0;
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, x, (MSG_TOP + msg_bottom) / 2 - LINE_H, line);
 
+    char who[NODE_NAME_MAX + 1] = "a contact that is gone";
     if (mesh->target_contact) {
         const node_t* peer = model_target_node((mesh_state_t*)mesh, model->active);
-        char          who[NODE_NAME_MAX + 1] = "a contact that is gone";
         if (peer) model_node_label(peer, model->active, who, sizeof(who));
-        snprintf(line, sizeof(line), "type below to message %s", who);
-    } else {
-        snprintf(line, sizeof(line), "type below to send on %s", mesh->channels[mesh->input_channel].name);
     }
+
+    if (model->active == MESH_MT) {
+        if (mesh->target_contact) {
+            snprintf(line, sizeof(line), "msg %s", who);
+        } else {
+            snprintf(line, sizeof(line), "send on %s", mesh->channels[mesh->input_channel].display);
+        }
+    } else {
+        if (mesh->target_contact) {
+            snprintf(line, sizeof(line), "type below to message %s", who);
+        } else {
+            snprintf(line, sizeof(line), "type below to send on %s", mesh->channels[mesh->input_channel].name);
+        }
+    }
+    
     w = (float)strlen(line) * CHAR_W;
-    pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, (ui_w - w) / 2, (MSG_TOP + msg_bottom) / 2 + 4, line);
+    x = (screen_w - w) / 2;
+    if (x < 0) x = 0;
+    pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, x, (MSG_TOP + msg_bottom) / 2 + 4, line);
 }
 
 static void draw_messages(const app_model_t* model) {
     const mesh_state_t* mesh = &model->mesh[model->active];
+    float screen_w = (model->active == MESH_MT && model->show_packet_feed) ? (ui_w / 2.0f) : ui_w;
 
     build_lines(model);
     if (line_total == 0) {
@@ -689,20 +722,23 @@ static void draw_messages(const app_model_t* model) {
             localtime_r(&t, &tm_buf);
             strftime(date, sizeof(date), "%a %d %b", &tm_buf);
             float w = (float)strlen(date) * CHAR_W;
-            float cx = (ui_w - w) / 2;
+            float cx = (screen_w - w) / 2;
             pax_draw_line(&fb, COL_SEP, 8, y + LINE_H / 2.0f, cx - 10, y + LINE_H / 2.0f);
-            pax_draw_line(&fb, COL_SEP, cx + w + 10, y + LINE_H / 2.0f, ui_w - 12, y + LINE_H / 2.0f);
+            pax_draw_line(&fb, COL_SEP, cx + w + 10, y + LINE_H / 2.0f, screen_w - 12, y + LINE_H / 2.0f);
             pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, cx, y, date);
             continue;
         }
 
         bool selected = mesh->selected_seq >= 0 && (uint32_t)mesh->selected_seq == msg->seq;
         if (selected) {
-            pax_draw_rect(&fb, COL_SEL, 0, y - 1, ui_w - 6, LINE_H);
+            pax_draw_rect(&fb, COL_SEL, 0, y - 1, screen_w - 6, LINE_H);
             pax_draw_rect(&fb, ch->color, 0, y - 1, 3, LINE_H);
         }
 
         if (line->first) {
+            if (i != first) {
+                pax_draw_line(&fb, COL_SEP, 0, y - 2, screen_w, y - 2);
+            }
             draw_time_cell(model, msg, y);
 
             // A direct message takes over the channel column: which channel it
@@ -731,31 +767,30 @@ static void draw_messages(const app_model_t* model) {
                 // Colour alone distinguishes a NodeInfo short name from a raw
                 // node id -- no prefix, so the column is the same width either
                 // way.
-                pax_draw_text(&fb, msg->sender_named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, x_from(model), y,
-                              who);
+                pax_draw_text(&fb, msg->sender_named ? COL_FROM : COL_FROM_ID, FONT, FONT_SIZE, x_from(model), y, who);
+                
+                float x_snr = x_from(model) + (COL_FROM_CELLS + 1) * CHAR_W;
+                char snr_str[32];
+                if (msg->relayed_by[0] == '\0' && !msg->outgoing) {
+                    snprintf(snr_str, sizeof(snr_str), "(%.0fdB)", msg->snr_db_x4 / 4.0f);
+                    pax_draw_text(&fb, COL_OK, FONT, FONT_SIZE, x_snr, y, snr_str);
+                } else if (!msg->outgoing) {
+                    snprintf(snr_str, sizeof(snr_str), "%u hops", msg->hops);
+                    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, x_snr, y, snr_str);
+                }
             } else if (msg->outgoing && msg->acked) {
                 // The one place either network offers a real delivery proof.
                 pax_draw_text(&fb, COL_OK, FONT, FONT_SIZE, x_from(model), y, "ack");
             }
-
-            if (model->show_meta) {
-                // Signal-to-noise, not RSSI. The coprocessor reports a per-packet
-                // RSSI of zero for every frame, so the dBm figure that used to be
-                // here was never a measurement. SNR is real and is what
-                // distinguishes a comfortable link from a marginal one anyway.
-                char meta[24];
-                snprintf(meta, sizeof(meta), "%3d.%1u dB %uh", msg->snr_db_x4 / 4,
-                         (unsigned)((msg->snr_db_x4 < 0 ? -msg->snr_db_x4 : msg->snr_db_x4) % 4) * 25 / 10,
-                         (unsigned)(msg->hops > 99 ? 99 : msg->hops));
-                pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, ui_w - 10 - COL_META_CELLS * CHAR_W, y, meta);
-            }
         }
 
-        char body[TEXT_MAX];
-        int  len = line->len < (int)sizeof(body) - 1 ? line->len : (int)sizeof(body) - 1;
-        memcpy(body, &msg->text[line->start], len);
-        body[len] = '\0';
-        pax_draw_text(&fb, msg->outgoing ? COL_SENT : COL_TEXT, FONT, FONT_SIZE, x_text(model), y, body);
+        if (line->len > 0) {
+            char body[TEXT_MAX];
+            int  len = line->len < (int)sizeof(body) - 1 ? line->len : (int)sizeof(body) - 1;
+            memcpy(body, &msg->text[line->start], len);
+            body[len] = '\0';
+            pax_draw_text(&fb, msg->outgoing ? COL_SENT : COL_TEXT, FONT, FONT_SIZE, x_text(model), y, body);
+        }
     }
 
     // Slim scrollbar rather than a text indicator: it costs no columns and
@@ -766,8 +801,8 @@ static void draw_messages(const app_model_t* model) {
         if (thumb_h < 12) thumb_h = 12;
         float travel = track_h - thumb_h;
         float above  = (float)first / (float)(line_total - msg_rows);
-        pax_draw_rect(&fb, COL_SEP, ui_w - 4, MSG_TOP, 3, track_h);
-        pax_draw_rect(&fb, mesh->pinned ? COL_FROM_ID : KEY_YELLOW, ui_w - 4, MSG_TOP + travel * above, 3, thumb_h);
+        pax_draw_rect(&fb, COL_SEP, screen_w - 4, MSG_TOP, 3, track_h);
+        pax_draw_rect(&fb, mesh->pinned ? COL_FROM_ID : KEY_YELLOW, screen_w - 4, MSG_TOP + travel * above, 3, thumb_h);
     }
 
     // Arrivals while scrolled away are announced rather than silently added.
@@ -775,8 +810,8 @@ static void draw_messages(const app_model_t* model) {
         char note[32];
         snprintf(note, sizeof(note), " %d new - fn+down ", mesh->unseen);
         float w = (float)strlen(note) * CHAR_W;
-        pax_draw_round_rect(&fb, 0xFF2A3550, (ui_w - w) / 2, msg_bottom - LINE_H - 2, w, LINE_H, 4);
-        pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, (ui_w - w) / 2, msg_bottom - LINE_H, note);
+        pax_draw_round_rect(&fb, 0xFF2A3550, (screen_w - w) / 2, msg_bottom - LINE_H - 2, w, LINE_H, 4);
+        pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, (screen_w - w) / 2, msg_bottom - LINE_H, note);
     }
 }
 
@@ -862,18 +897,19 @@ static void draw_hints(const app_model_t* model) {
     // The red cross escalates: clear, then leave the conversation, then leave
     // the app. Label it with whichever it will actually do next, so leaving a
     // private conversation is never a guess.
-    const char* escape = "exit";
+    const char* escape = "PACKET";
     if (model->composer_len > 0) {
-        escape = "clear";
+        escape = "CLEAR";
     } else if (mesh->target_contact) {
-        escape = "leave DM";
+        escape = "LEAVE DM";
     }
+    x = hint_text(x, hint_y + 1, "ESC=EXIT");
     x = hint(x, hint_y + 1, CAP_CROSS, escape);
     x = hint(x, hint_y + 1, CAP_TRI, model->active == MESH_MC ? "MT" : "MC");
-    x = hint(x, hint_y + 1, CAP_SQUARE, model->show_meta ? "meta on" : "meta off");
-    x = hint(x, hint_y + 1, CAP_CIRCLE, "nodes");
-    x = hint(x, hint_y + 1, CAP_CLOUD, "ident");
-    x = hint(x, hint_y + 1, CAP_DIAMOND, "channels");
+    x = hint(x, hint_y + 1, CAP_SQUARE, "NODEINFO");
+    x = hint(x, hint_y + 1, CAP_CIRCLE, "NODES");
+    x = hint(x, hint_y + 1, CAP_CLOUD, "IDENT");
+    x = hint(x, hint_y + 1, CAP_DIAMOND, "CHANNELS");
     (void)x;
 }
 
@@ -1386,7 +1422,7 @@ static void draw_nodes(const app_model_t* model) {
     y       += 6;
     float hx = bx + 12;
     hx       = hint(hx, y, CAP_CROSS, "close");
-    hx       = hint(hx, y, CAP_TRI, "announce");
+    hx       = hint(hx, y, CAP_TRI, "SENDGPS");
     hx       = hint(hx, y, CAP_SQUARE, "clear all");
     hint_text(hx, y, "enter details");
 }
@@ -1755,12 +1791,209 @@ static void draw_toast(const app_model_t* model) {
     pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, x + 10, y + 3, model->toast);
 }
 
+static void draw_packet_feed(const app_model_t* model) {
+    float half_w = ui_w / 2.0f;
+    float start_x = half_w;
+    float y = MSG_TOP;
+
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, start_x + 6, y, "PACKET INSPECTOR");
+    y += LINE_H + 4;
+    pax_draw_line(&fb, COL_SEP, start_x + 6, y, ui_w - 6, y);
+    y += 4;
+
+    for (int i = 0; i < PACKET_LOG_MAX && y + LINE_H * 2 <= msg_bottom; i++) {
+        int idx = (model->packet_history_head - 1 - i + PACKET_LOG_MAX) % PACKET_LOG_MAX;
+        const packet_log_entry_t* entry = &model->packet_history[idx];
+
+        if (entry->sender[0] == '\0') break;
+
+        char line1[128];
+        char line2[128];
+        const char* type_str = "UNK";
+        pax_col_t color = COL_TEXT;
+
+        switch (entry->type) {
+            case PKT_TEXT:       type_str = "MSG"; color = COL_OK; break;
+            case PKT_NODEINFO:   type_str = "NOD"; color = KEY_YELLOW; break;
+            case PKT_POSITION:   type_str = "POS"; color = COL_SENT; break;
+            case PKT_TELEMETRY:  type_str = "TLM"; color = COL_DIM; break;
+            case PKT_TRACEROUTE: type_str = "RTE"; color = COL_DM; break;
+            default: break;
+        }
+
+        char who[12];
+        snprintf(who, sizeof(who), "%.11s", entry->sender);
+        
+        pax_draw_line(&fb, COL_SEP, start_x, y - 2, ui_w, y - 2);
+        
+        char content[90];
+        snprintf(content, sizeof(content), "%.70s", entry->info);
+
+        if (entry->via_name[0] == '\0') {
+            char part1[32];
+            snprintf(part1, sizeof(part1), "[%s] %s (", type_str, who);
+            char part2[16];
+            snprintf(part2, sizeof(part2), "%.0fdB", entry->snr);
+            char part3[8];
+            snprintf(part3, sizeof(part3), ")");
+            
+            pax_draw_text(&fb, color, FONT, FONT_SIZE, start_x + 6, y, part1);
+            pax_draw_text(&fb, COL_OK, FONT, FONT_SIZE, start_x + 6 + strlen(part1) * CHAR_W, y, part2);
+            pax_draw_text(&fb, color, FONT, FONT_SIZE, start_x + 6 + (strlen(part1) + strlen(part2)) * CHAR_W, y, part3);
+            
+            snprintf(line2, sizeof(line2), "%s", content);
+        } else {
+            uint8_t hops_taken = entry->hop_start >= entry->hop_limit ? entry->hop_start - entry->hop_limit : 0;
+            if (entry->via_name[0]) {
+                snprintf(line1, sizeof(line1), "[%s] %s via - %s %u/%u hops", type_str, who, entry->via_name, hops_taken, entry->hop_start);
+            } else {
+                snprintf(line1, sizeof(line1), "[%s] %s %u/%u hops", type_str, who, hops_taken, entry->hop_start);
+            }
+            snprintf(line2, sizeof(line2), "%s", content);
+            pax_draw_text(&fb, color, FONT, FONT_SIZE, start_x + 6, y, line1);
+        }
+        y += LINE_H;
+        pax_col_t line2_col = COL_DIM;
+        if (entry->type == PKT_TELEMETRY && (strstr(line2, "c ") || strstr(line2, "hPa"))) {
+            line2_col = COL_BAD;
+        }
+        pax_draw_text(&fb, line2_col, FONT, FONT_SIZE, start_x + 12, y, line2);
+        y += LINE_H + 2;
+    }
+}
+
+#define PAX_COL_RGB(r, g, b) (0xFF000000 | ((r) << 16) | ((g) << 8) | (b))
+
+static void draw_waterfall(const app_model_t* model) {
+    pax_background(&fb, COL_BG);
+
+    pax_draw_text(&fb, COL_TEXT, FONT, FONT_SIZE, 8, 8, "SPECTRUM SCANNER");
+
+    float start_freq = model->waterfall_freq_start / 1000000.0f;
+    float end_freq = model->waterfall_freq_end / 1000000.0f;
+    char freq_label[64];
+    snprintf(freq_label, sizeof(freq_label), "%.2f - %.2f MHz", start_freq, end_freq);
+    pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, 8, 24, freq_label);
+
+    int graph_x = 8;
+    int graph_y = 50;
+    int graph_w = ui_w - 16;
+    int graph_h = ui_h - 70;
+
+    pax_draw_rect(&fb, COL_DIM, graph_x, graph_y, graph_w, graph_h);
+    pax_draw_rect(&fb, COL_BG, graph_x + 1, graph_y + 1, graph_w - 2, graph_h - 2);
+
+    int bot_h = (int)((graph_h - 2) * 0.15f);
+    int top_h = (graph_h - 2) - bot_h;
+    
+    pax_draw_line(&fb, COL_DIM, graph_x, graph_y + 1 + top_h, graph_x + graph_w, graph_y + 1 + top_h);
+
+    float bin_w = (float)(graph_w - 2) / (float)WATERFALL_BINS;
+    
+    // Top graph (bars & peaks)
+    for (int i = 0; i < WATERFALL_BINS; i++) {
+        float rssi = model->waterfall_data[i];
+        if (rssi < -140.0f) rssi = -140.0f;
+        if (rssi > -30.0f) rssi = -30.0f;
+
+        float val = (rssi + 140.0f) / 110.0f;
+        int bar_h = (int)(val * top_h);
+        
+        pax_col_t col = COL_OK;
+        if (rssi > -70.0f) col = COL_BAD;
+        else if (rssi > -100.0f) col = COL_TEXT;
+
+        float bx = graph_x + 1 + i * bin_w;
+        float bw = bin_w > 1.0f ? bin_w - 0.5f : bin_w;
+        pax_draw_rect(&fb, col, bx, graph_y + 1 + top_h - bar_h, bw, bar_h);
+        
+        float peak_rssi = model->waterfall_peaks[i];
+        if (peak_rssi > -140.0f) {
+            if (peak_rssi > -30.0f) peak_rssi = -30.0f;
+            float peak_val = (peak_rssi + 140.0f) / 110.0f;
+            int peak_h = (int)(peak_val * top_h);
+            
+            pax_col_t peak_col = COL_BAD;
+            if (peak_rssi <= -70.0f) peak_col = COL_TEXT;
+            if (peak_rssi <= -100.0f) peak_col = COL_OK;
+            
+            pax_draw_rect(&fb, peak_col, bx, graph_y + 1 + top_h - peak_h - 2, bw, 2);
+        }
+    }
+
+    // Bottom graph (history waterfall)
+    float hist_line_h = (float)bot_h / (float)WATERFALL_HISTORY;
+    for (int h = 0; h < WATERFALL_HISTORY; h++) {
+        int idx = (model->waterfall_history_head - 1 - h + WATERFALL_HISTORY) % WATERFALL_HISTORY;
+        
+        int i = 0;
+        while (i < WATERFALL_BINS) {
+            uint8_t c = model->waterfall_history[idx][i];
+            
+            // Find how many consecutive bins have the same color
+            int run_len = 1;
+            while (i + run_len < WATERFALL_BINS && model->waterfall_history[idx][i + run_len] == c) {
+                run_len++;
+            }
+            
+            if (c > 0) {
+                uint8_t r = 0, g = 0, b = 0;
+                if (c < 64) {
+                    b = c * 4;
+                } else if (c < 128) {
+                    g = (c - 64) * 4;
+                    b = 255 - g;
+                } else if (c < 192) {
+                    r = (c - 128) * 4;
+                    g = 255;
+                } else {
+                    r = 255;
+                    g = 255 - (c - 192) * 4;
+                }
+                pax_col_t hist_col = PAX_COL_RGB(r, g, b);
+                
+                float bx = graph_x + 1 + i * bin_w;
+                float bw = (bin_w * run_len);
+                if (bw > 1.0f) bw -= 0.5f;
+                float by = graph_y + 1 + top_h + h * hist_line_h;
+                float bh = hist_line_h > 1.0f ? hist_line_h : 1.0f;
+                
+                pax_draw_rect(&fb, hist_col, bx, by, bw, bh);
+            }
+            i += run_len;
+        }
+    }
+
+    // Grid lines
+    int label_toggle = 0;
+    for (float f = start_freq; f <= end_freq + 0.001f; f += 0.05f) {
+        if (f >= start_freq && f <= end_freq) {
+            float ratio = (f - start_freq) / (end_freq - start_freq);
+            int line_x = graph_x + 1 + (int)(ratio * (graph_w - 2));
+            if (line_x < graph_x + 1) line_x = graph_x + 1;
+            if (line_x > graph_x + graph_w - 1) line_x = graph_x + graph_w - 1;
+            
+            pax_draw_line(&fb, COL_SEP, line_x, graph_y + 1, line_x, graph_y + graph_h - 2);
+            
+            if (label_toggle % 2 == 0) {
+                char lbl[16];
+                snprintf(lbl, sizeof(lbl), "%.2f", f);
+                pax_draw_text(&fb, COL_DIM, FONT, FONT_SIZE, line_x - 12, graph_y + graph_h + 2, lbl);
+            }
+            label_toggle++;
+        }
+    }
+}
+
 void ui_render(const app_model_t* model) {
     if (!have_display) return;
 
     pax_background(&fb, COL_BG);
     draw_status(model);
     draw_messages(model);
+    if (model->active == MESH_MT && model->show_packet_feed) {
+        draw_packet_feed(model);
+    }
     draw_toast(model);
     draw_hints(model);
     draw_composer(model);
@@ -1775,6 +2008,7 @@ void ui_render(const app_model_t* model) {
         case OVERLAY_NODE_DETAIL: draw_node_detail(model); break;
         case OVERLAY_NODE_SHORT: draw_node_short(model); break;
         case OVERLAY_SETTINGS: draw_settings(model); break;
+        case OVERLAY_WATERFALL: draw_waterfall(model); break;
         default: break;
     }
     blit();

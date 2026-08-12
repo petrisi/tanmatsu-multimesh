@@ -29,6 +29,7 @@
 #define MT_PORTNUM_NODEINFO     4
 #define MT_PORTNUM_ROUTING      5
 #define MT_PORTNUM_TELEMETRY    67
+#define MT_PORTNUM_TRACEROUTE_APP 71
 
 // Reserved destination meaning "deliver over MQTT or BLE only". Nobody puts it
 // on the air, so a relay must not either.
@@ -159,10 +160,38 @@ typedef struct {
     bool    has_public_key;
 } mt_user_t;
 
+typedef struct {
+    bool has_battery;
+    uint32_t battery_level;
+    bool has_voltage;
+    float voltage;
+    bool has_temperature;
+    float temperature;
+    bool has_humidity;
+    float humidity;
+    bool has_baro;
+    float baro;
+} mt_telemetry_t;
+
+typedef struct {
+    int32_t latitude_i;
+    int32_t longitude_i;
+    int32_t altitude;
+} mt_position_t;
+
+typedef struct {
+    uint32_t route[10];
+    int route_len;
+} mt_route_t;
+
 // Fields we do not use are skipped by wire type rather than rejected, so a
 // newer sender with extra fields still parses.
 bool   mt_user_parse(const uint8_t* buf, size_t len, mt_user_t* out);
 size_t mt_user_encode(const mt_user_t* user, uint8_t* out, size_t out_max);
+bool   mt_telemetry_parse(const uint8_t* buf, size_t len, mt_telemetry_t* out);
+bool   mt_position_parse(const uint8_t* buf, size_t len, mt_position_t* out);
+size_t mt_position_encode(const mt_position_t* pos, uint8_t* out, size_t out_max);
+bool   mt_route_parse(const uint8_t* buf, size_t len, mt_route_t* out);
 
 // Check the NodeInfo encoding against bytes computed from the protobuf spec
 // rather than by this code.

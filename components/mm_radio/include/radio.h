@@ -37,6 +37,11 @@ void radio_drain(void);
 // Poll for one received frame. `timeout_ms` of 0 returns immediately.
 bool radio_receive(lora_protocol_lora_packet_t* out, uint32_t timeout_ms);
 
+// Spectrum scanner helpers
+void radio_scan_start(void);
+float radio_scan_measure(uint32_t freq_hz);
+void radio_scan_stop(void);
+
 // Transmit one frame. BLOCKS until the packet has left the antenna -- around
 // half a second for a short message at SF8/BW62.5 -- so this must only ever be
 // called from a worker task, never from the loop that draws the screen.
