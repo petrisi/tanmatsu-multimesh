@@ -1304,14 +1304,10 @@ static bool     screen_dark;
 static bool     kbd_dark;
 static uint8_t  kbd_brightness = 100;  // read once in screen_power_init()
 
-// Round to the nearest step the setting offers, so a device set to 37% in the
-// launcher becomes 40% here rather than an unreachable value the arrows can
-// never return to.
-static uint8_t brightness_snap(uint8_t pct) {
-    int v = ((int)pct + SET_BRIGHTNESS_STEP / 2) / SET_BRIGHTNESS_STEP * SET_BRIGHTNESS_STEP;
-    if (v < SET_BRIGHTNESS_MIN) v = SET_BRIGHTNESS_MIN;
-    if (v > SET_BRIGHTNESS_MAX) v = SET_BRIGHTNESS_MAX;
-    return (uint8_t)v;
+// The setting is a perceived level; the backlight wants a duty cycle. Every
+// place that lights the screen goes through here so the two never diverge.
+static void screen_apply_brightness(void) {
+    bsp_display_set_backlight_brightness(brightness_duty(model.settings.brightness));
 }
 
 static void screen_power_init(void) {
@@ -1320,11 +1316,11 @@ static void screen_power_init(void) {
     if (model.settings.brightness == 0) {
         // No stored preference: adopt whatever the device is already set to, so
         // a first run does not brighten someone's carefully dimmed screen.
-        model.settings.brightness =
-            (bsp_display_get_backlight_brightness(&current) == ESP_OK && current > 0) ? brightness_snap(current)
-                                                                                     : SET_BRIGHTNESS_MAX;
+        model.settings.brightness = (bsp_display_get_backlight_brightness(&current) == ESP_OK && current > 0)
+                                        ? brightness_level_for_duty(current)
+                                        : SET_BRIGHTNESS_MAX;
     }
-    bsp_display_set_backlight_brightness(model.settings.brightness);
+    screen_apply_brightness();
 
     // The keyboard has no setting of its own, so its level is simply whatever
     // the device was on. A failed read leaves the 100% default: too bright is
@@ -1343,7 +1339,7 @@ static void kbd_restore(void) {
 
 static void screen_restore(void) {
     if (!screen_dark) return;
-    bsp_display_set_backlight_brightness(model.settings.brightness);
+    screen_apply_brightness();
     screen_dark = false;
 }
 
@@ -1566,7 +1562,7 @@ static void setting_step(setting_field_t field, int delta) {
             // Applied as it is stepped, because judging a brightness from a
             // number is guesswork. This is also what waking from dark restores,
             // so the two can never disagree.
-            bsp_display_set_backlight_brightness(s->brightness);
+            screen_apply_brightness();
             screen_dark = false;
             break;
         }
@@ -1707,7 +1703,7 @@ static void handle_settings_key(bsp_input_navigation_key_t key) {
             apply_settings();
             // Brightness is applied while it is being stepped, so cancelling has
             // to put the screen back as well as the setting.
-            bsp_display_set_backlight_brightness(model.settings.brightness);
+            screen_apply_brightness();
             model.overlay = OVERLAY_NONE;
             break;
         default: break;

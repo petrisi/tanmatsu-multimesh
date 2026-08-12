@@ -434,6 +434,21 @@ const char*         mt_profile_name(int id);
 #define SET_BRIGHTNESS_MAX  100
 #define SET_BRIGHTNESS_STEP 10
 
+// The setting is a perceived level; the backlight takes a duty cycle, and the
+// two are not the same thing. Eyes respond to ratios, so evenly spaced duty
+// gives wildly uneven steps: 20% to 10% halves the light and is obvious, while
+// 100% to 90% changes it by a ninth and is invisible. Ten linear steps are
+// therefore one usable step and nine that do nothing.
+//
+// These are spaced geometrically instead -- each about 1.4x the last, from 5%
+// to full -- so every step is the same visible change wherever you are on the
+// scale.
+uint8_t brightness_duty(uint8_t level);
+
+// Nearest level for a duty the device is already set to, for adopting the
+// launcher's brightness at first run.
+uint8_t brightness_level_for_duty(uint8_t duty);
+
 #define SET_DISPLAY_OFF_DEFAULT 5
 // Shorter than the screen, because the keys are lit for the moment you are
 // typing and the screen is worth reading long after.

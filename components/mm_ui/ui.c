@@ -1789,7 +1789,13 @@ static void draw_settings(const app_model_t* model) {
         case SET_FIELD_MT_POWER: note = "transmit power; the module stops at 22 dBm"; break;
         case SET_FIELD_LATITUDE:
         case SET_FIELD_LONGITUDE: note = "sent in every MeshCore advert once set"; break;
-        case SET_FIELD_BRIGHTNESS: note = "applied as you step it, and restored on waking"; break;
+        case SET_FIELD_BRIGHTNESS:
+            // The duty behind the level, because the two differ on purpose and
+            // seeing both is what makes an odd-looking step explicable.
+            snprintf(described, sizeof(described), "backlight duty %u%%, applied as you step it",
+                     (unsigned)brightness_duty(model->settings.brightness));
+            note = described;
+            break;
         case SET_FIELD_DISPLAY_OFF: note = "backlight only - radio keeps running"; break;
         case SET_FIELD_KBD_OFF: note = "key backlight only - the keys still work"; break;
         case SET_FIELD_MT_HOPS: note = "resets here at start; fn+0..7 for now"; break;

@@ -66,6 +66,30 @@ void model_init(app_model_t* model) {
     model->mt_active_hops       = model->settings.mt_default_hops;
 }
 
+// Duty cycle per 10% level, from 5% to full in a geometric ramp of roughly
+// 1.4x per step. The floor is 5 rather than lower because a tester's screen at
+// 2% was not readable at all.
+static const uint8_t BRIGHTNESS_DUTY[] = {5, 7, 10, 14, 19, 26, 37, 51, 72, 100};
+
+uint8_t brightness_duty(uint8_t level) {
+    int index = ((int)level / SET_BRIGHTNESS_STEP) - 1;  // 10% -> 0, 100% -> 9
+    if (index < 0) index = 0;
+    if (index >= (int)(sizeof(BRIGHTNESS_DUTY) / sizeof(BRIGHTNESS_DUTY[0]))) {
+        index = (int)(sizeof(BRIGHTNESS_DUTY) / sizeof(BRIGHTNESS_DUTY[0])) - 1;
+    }
+    return BRIGHTNESS_DUTY[index];
+}
+
+uint8_t brightness_level_for_duty(uint8_t duty) {
+    int best = 0;
+    for (int i = 1; i < (int)(sizeof(BRIGHTNESS_DUTY) / sizeof(BRIGHTNESS_DUTY[0])); i++) {
+        int here = BRIGHTNESS_DUTY[i] > duty ? BRIGHTNESS_DUTY[i] - duty : duty - BRIGHTNESS_DUTY[i];
+        int have = BRIGHTNESS_DUTY[best] > duty ? BRIGHTNESS_DUTY[best] - duty : duty - BRIGHTNESS_DUTY[best];
+        if (here < have) best = i;
+    }
+    return (uint8_t)((best + 1) * SET_BRIGHTNESS_STEP);
+}
+
 int settings_visible_fields(mesh_id_t active, const settings_t* settings, setting_field_t* out, int max) {
     static const setting_field_t shared[] = {SET_FIELD_LATITUDE, SET_FIELD_LONGITUDE, SET_FIELD_BRIGHTNESS,
                                             SET_FIELD_DISPLAY_OFF, SET_FIELD_KBD_OFF};
