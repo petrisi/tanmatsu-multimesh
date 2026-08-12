@@ -77,6 +77,13 @@ launcher home screen — the top-right icon changes from a bug to a USB symbol. 
 debug mode it enumerates as COM ports instead and `deploy.ps1` reports "Badge not
 found". The two USB modes are mutually exclusive.
 
+The scripts hardcode no paths. Everything they need is in
+[`tools/config.ps1`](tools/config.ps1): locations inside the repository are
+derived from where that file sits, so the checkout works on any drive, and the
+few things outside it — where ESP-IDF is installed, chiefly — have defaults you
+can override with an environment variable rather than by editing anything. See
+[`tools/README.md`](tools/README.md) for the list.
+
 `assets/metadata.json` and the `assets/icon*.png` files are the launcher entry;
 regenerate the icons with `tools/make-icon.py` if you change them. The version
 and revision live in that metadata, and `deploy.ps1` reads them from there.

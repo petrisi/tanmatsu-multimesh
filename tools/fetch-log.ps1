@@ -13,22 +13,21 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot\config.ps1"
 
 $device = Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like "*VID_16D0*" }
 if (-not $device) {
     throw "Badge not found. Put the device in BadgeLink mode: violet diamond on the launcher home screen."
 }
 
-$badgelink = Join-Path $PSScriptRoot "badgelink"
-$py        = Join-Path $badgelink ".venv\Scripts\python.exe"
-if (-not (Test-Path $py)) { throw "BadgeLink venv missing at $py" }
+if (-not (Test-Path $MM_Python)) { throw "BadgeLink venv missing at $MM_Python - see tools\README.md" }
 
 # Absolute, because badgelink runs from its own directory.
 $target = if ([System.IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path (Get-Location) $Out }
 
-Push-Location $badgelink
+Push-Location $MM_BadgeLink
 try {
-    & $py badgelink.py fs download "/int/multimesh/session.log" $target
+    & $MM_Python badgelink.py fs download $MM_DeviceLog $target
     if ($LASTEXITCODE -ne 0) { throw "fs download failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location

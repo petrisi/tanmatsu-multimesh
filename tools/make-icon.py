@@ -118,7 +118,10 @@ def preview(px):
 
 
 if __name__ == "__main__":
-    out_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+    # Defaults to the repository's own assets directory, found relative to this
+    # file, so running it from anywhere writes where the launcher entry expects.
+    default_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "assets")
+    out_dir     = sys.argv[1] if len(sys.argv) > 1 else os.path.normpath(default_dir)
     for size in (16, 32, 64):
         px   = render(size)
         path = os.path.join(out_dir, f"icon{size}.png")

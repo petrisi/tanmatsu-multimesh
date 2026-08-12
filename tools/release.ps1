@@ -1,7 +1,7 @@
 # Stage a release into a checkout of the app-repository fork.
 #
-#   K:\tanmatsu\tools\release.ps1
-#   K:\tanmatsu\tools\release.ps1 -RepoPath D:\src\app-repository
+#   .\tools\release.ps1
+#   .\tools\release.ps1 -RepoPath D:\src\app-repository
 #
 # The Tanmatsu store is a git repository: one folder per app, holding the
 # compiled binary, icons, licence and metadata. Nothing else -- no source. So a
@@ -12,22 +12,24 @@
 # is the point at which the repository's contributor licence agreement applies.
 
 param(
-    [string]$RepoPath = "K:\app-repository",
+    [string]$RepoPath = "",
     [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $PSScriptRoot
-$slug = "fi.ps.multimesh"
+. "$PSScriptRoot\config.ps1"
+
+# Where the fork is checked out. Defaults to $MM_ReleaseRepo, which follows this
+# repository rather than naming a drive.
+if (-not $RepoPath) { $RepoPath = $MM_ReleaseRepo }
 
 # --- gather and check ----------------------------------------------------
 
-$metaPath = Join-Path $root "assets\metadata.json"
-if (-not (Test-Path $metaPath)) { throw "Missing $metaPath" }
-$meta = Get-Content $metaPath -Raw | ConvertFrom-Json
+if (-not (Test-Path $MM_Metadata)) { throw "Missing $MM_Metadata" }
+$meta = Get-Content $MM_Metadata -Raw | ConvertFrom-Json
 
-$app = $meta.application | Where-Object { $_.targets -contains "tanmatsu" } | Select-Object -First 1
-if (-not $app) { throw "No application entry targeting 'tanmatsu' in $metaPath" }
+$app = $meta.application | Where-Object { $_.targets -contains $MM_Target } | Select-Object -First 1
+if (-not $app) { throw "No application entry targeting '$MM_Target' in $MM_Metadata" }
 
 if (-not $SkipBuild) {
     "Building..."
@@ -35,8 +37,7 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
 
-$bin = Join-Path $root "build\tanmatsu\application.bin"
-if (-not (Test-Path $bin)) { throw "No build output at $bin - run tools\build.ps1 first" }
+if (-not (Test-Path $MM_Bin)) { throw "No build output at $MM_Bin - run tools\build.ps1 first" }
 
 # The store folder must contain a file with exactly the name `executable`
 # carries, because that is the URL the launcher fetches.
@@ -46,7 +47,7 @@ if (-not $exeName) { throw "No 'executable' in the tanmatsu application entry" }
 if (-not (Test-Path $RepoPath)) {
     throw "No app-repository checkout at $RepoPath. Fork and clone it first:`n" +
           "  gh repo fork Nicolai-Electronics/app-repository --clone --fork-name app-repository`n" +
-          "or pass -RepoPath to point at an existing checkout."
+          "or set `$env:MULTIMESH_APP_REPO / pass -RepoPath to point at an existing checkout."
 }
 
 # A submission built on a stale fork carries other people's outdated apps in the
@@ -64,22 +65,22 @@ try {
 
 # --- stage ---------------------------------------------------------------
 
-$dest = Join-Path $RepoPath $slug
+$dest = Join-Path $RepoPath $MM_Slug
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
-Copy-Item $bin (Join-Path $dest $exeName) -Force
-Copy-Item $metaPath (Join-Path $dest "metadata.json") -Force
-Copy-Item (Join-Path $root "LICENSE") (Join-Path $dest "LICENSE") -Force
+Copy-Item $MM_Bin (Join-Path $dest $exeName) -Force
+Copy-Item $MM_Metadata (Join-Path $dest "metadata.json") -Force
+Copy-Item $MM_License (Join-Path $dest "LICENSE") -Force
 
 # The binary statically links MIT and Apache-2.0 components, whose licences
 # require their notices to travel with it. Shipping the binary without them
 # would be distributing other people's work without the attribution they ask
 # for -- which costs one file to avoid.
-Copy-Item (Join-Path $root "THIRD-PARTY-NOTICES.md") (Join-Path $dest "THIRD-PARTY-NOTICES.md") -Force
+Copy-Item $MM_Notices (Join-Path $dest "THIRD-PARTY-NOTICES.md") -Force
 
 foreach ($size in @("16", "32", "64")) {
     $icon = "icon$size.png"
-    $src  = Join-Path $root "assets\$icon"
+    $src  = Join-Path $MM_Assets $icon
     if (-not (Test-Path $src)) { throw "Missing $src - run tools\make-icon.py" }
     Copy-Item $src (Join-Path $dest $icon) -Force
 }
@@ -88,9 +89,8 @@ foreach ($size in @("16", "32", "64")) {
 
 # Against the store's own schema, not our reading of it. The check is skipped
 # rather than faked when the validator is unavailable.
-$validator = Join-Path $root "reference\app-repository\.validator"
-if ((Test-Path (Join-Path $validator "node_modules")) -and (Get-Command node -ErrorAction SilentlyContinue)) {
-    Push-Location $validator
+if ((Test-Path (Join-Path $MM_Validator "node_modules")) -and (Get-Command node -ErrorAction SilentlyContinue)) {
+    Push-Location $MM_Validator
     try {
         & node validate.js (Join-Path $dest "metadata.json")
         if ($LASTEXITCODE -ne 0) { throw "metadata.json failed the store schema" }
@@ -111,13 +111,13 @@ foreach ($name in @($exeName, "metadata.json", "LICENSE", "THIRD-PARTY-NOTICES.m
 # --- report --------------------------------------------------------------
 
 ""
-"Staged $slug v$($meta.version) revision $($app.revision) into $dest"
+"Staged $MM_Slug v$($meta.version) revision $($app.revision) into $dest"
 Get-ChildItem $dest | ForEach-Object { "  {0,10:N0}  {1}" -f $_.Length, $_.Name }
 ""
 "Next:"
 "  cd $RepoPath"
-"  git switch -c $slug-v$($meta.version)"
-"  git add $slug"
+"  git switch -c $MM_Slug-v$($meta.version)"
+"  git add $MM_Slug"
 "  git commit -m ""Add MultiMesh $($meta.version)"""
 "  git push -u origin HEAD"
 "  gh pr create --repo Nicolai-Electronics/app-repository --fill"

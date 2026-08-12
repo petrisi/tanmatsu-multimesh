@@ -5,6 +5,7 @@ plain CPython and run anywhere.
 
 | Script | |
 |---|---|
+| `config.ps1` | central settings — every path lives here, nothing else hardcodes one |
 | `idf-env.ps1` | dot-source it to activate ESP-IDF v6.0.2 for the session |
 | `build.ps1` | build → `build/tanmatsu/application.bin` |
 | `deploy.ps1` | upload to AppFS over BadgeLink; `-Start` also launches it |
@@ -12,10 +13,26 @@ plain CPython and run anywhere.
 | `make-icon.py` | regenerate `assets/icon32.png` (writes the PNG by hand — no image library needed) |
 | `gen_fi_glyphs.py` | regenerate the Finnish glyphs in `components/mm_ui/font_mono_fi.c` |
 
-## ESP-IDF
+## Paths
 
-`idf-env.ps1` defaults to `K:\esp\v6.0.2\esp-idf` with its tools in `K:\esp\tools`.
-Point it elsewhere without editing the script:
+**No script hardcodes a path.** Everything is in `config.ps1`, which the others
+dot-source. Locations inside the repository are derived from where that file
+sits, so a fresh clone works wherever it is checked out — no drive letter is
+assumed anywhere.
+
+The four things that live *outside* the repository can't be derived, so they
+have defaults you can override with an environment variable:
+
+| Variable | Default | |
+|---|---|---|
+| `TANMATSU_IDF_PATH` | `$IDF_PATH`, else `K:\esp\v6.0.2\esp-idf` | where ESP-IDF v6.0.2 is installed |
+| `TANMATSU_IDF_TOOLS_PATH` | `$IDF_TOOLS_PATH`, else `K:\esp\tools` | its toolchain |
+| `MULTIMESH_APP_REPO` | a sibling directory named `app-repository` | the fork used for store releases |
+| `MULTIMESH_SLUG` | `fi.ps.multimesh` | app identity, if you fork under another name |
+
+An ESP-IDF you have already activated is picked up automatically, so the drive
+letters above only apply on a machine that has neither the environment variable
+nor an active IDF.
 
 ```powershell
 $env:TANMATSU_IDF_PATH       = "C:\esp\v6.0.2\esp-idf"
@@ -26,6 +43,11 @@ idf.py --version                # expect v6.0.2
 
 The SDK deliberately lives outside the repository so it is shared between
 projects and never lands in git.
+
+The Python scripts resolve their own paths the same way — relative to the file —
+and both accept an override. `gen_fi_glyphs.py` reads PAX's base font from
+`managed_components/`, which only exists after a build has resolved
+dependencies; it says so rather than failing obscurely if you run it first.
 
 ## BadgeLink
 

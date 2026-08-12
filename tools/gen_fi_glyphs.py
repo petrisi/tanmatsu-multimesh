@@ -4,12 +4,34 @@ Derived rather than hand-drawn so the accented forms match the base letterforms
 exactly. Format, verified against pax_text.c: 9 bytes per glyph, one byte per
 row, bit 0 = leftmost pixel, 7 of 8 bits used.
 """
+import os
 import re
+import sys
+from pathlib import Path
 
 W, H = 7, 9
-SRC = r"K:\tanmatsu\managed_components\robotman2412__pax-gfx\core\src\fonts\font_bitmap_7x9.c"
 
-body = open(SRC, encoding="utf-8", errors="replace").read().split("font_bitmap_raw_7x9[] = {", 1)[1]
+# Found relative to this file so a fresh clone works wherever it sits. The base
+# font arrives with the pax-gfx dependency, so it only exists after a build has
+# resolved managed components.
+ROOT = Path(__file__).resolve().parent.parent
+SRC = Path(
+    sys.argv[1]
+    if len(sys.argv) > 1
+    else os.environ.get(
+        "PAX_FONT_SOURCE",
+        ROOT / "managed_components" / "robotman2412__pax-gfx" / "core" / "src" / "fonts" / "font_bitmap_7x9.c",
+    )
+)
+
+if not SRC.is_file():
+    sys.exit(
+        f"Base font not found at {SRC}\n"
+        "It comes from the pax-gfx dependency, so build once to fetch managed components,\n"
+        "or pass the path as an argument / set PAX_FONT_SOURCE."
+    )
+
+body = SRC.read_text(encoding="utf-8", errors="replace").split("font_bitmap_raw_7x9[] = {", 1)[1]
 data = [int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{2})", body)]
 
 
