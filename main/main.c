@@ -198,6 +198,10 @@ static void apply_settings(void) {
     mc_set_location(model.settings.has_location, model.settings.latitude, model.settings.longitude);
     mt_set_hop_limit(model.mt_active_hops);
     mt_set_role(model.settings.mt_role);
+
+    mt_radio_t radio;
+    mt_radio_resolve(&model.settings, &radio);
+    mt_set_radio(&radio, model.settings.mt_power);
     // Relaying is what CLIENT means; the two refinements only apply once it is.
     mt_set_relay(model.settings.mt_role == MT_ROLE_CLIENT, model.settings.mt_always_repeat,
                  model.settings.mt_optimize_text);
@@ -1393,8 +1397,53 @@ static bool text_to_coord(const char* text, int32_t* out, int32_t limit) {
 // those and touches nothing else.
 static settings_t settings_backup;
 
+// Frequency is typed for the same reason coordinates are, but needs its own
+// parser: a coordinate stops at 200 whole units and this is 869. MHz in, hertz
+// out, six decimals -- enough for 869.43125 exactly.
+static void freq_to_text(char* out, size_t out_size, uint32_t hz) {
+    snprintf(out, out_size, "%lu.%06lu", (unsigned long)(hz / 1000000u), (unsigned long)(hz % 1000000u));
+    for (int i = (int)strlen(out) - 1; i > 0 && out[i] == '0'; i--) out[i] = '\0';
+    size_t len = strlen(out);
+    if (len && out[len - 1] == '.') out[len - 1] = '\0';
+}
+
+static bool text_to_freq(const char* text, uint32_t* out) {
+    if (text == NULL || text[0] == '\0') return false;
+
+    int      i      = 0;
+    uint64_t whole  = 0;
+    bool     digits = false;
+    for (; text[i] >= '0' && text[i] <= '9'; i++) {
+        whole = whole * 10 + (uint64_t)(text[i] - '0');
+        digits = true;
+        if (whole > 1000) return false;
+    }
+    if (!digits) return false;
+
+    uint64_t frac = 0;
+    if (text[i] == '.' || text[i] == ',') {
+        i++;
+        for (int d = 0; d < 6; d++) {
+            if (text[i] >= '0' && text[i] <= '9') {
+                frac = frac * 10 + (uint64_t)(text[i] - '0');
+                i++;
+            } else {
+                frac *= 10;  // pad, so ".5" is half a megahertz rather than 5 Hz
+            }
+        }
+        while (text[i] >= '0' && text[i] <= '9') i++;  // ignore precision we cannot carry
+    }
+    if (text[i] != '\0') return false;  // trailing rubbish
+
+    uint64_t hz = whole * 1000000u + frac;
+    if (hz < MT_FREQ_MIN_HZ || hz > MT_FREQ_MAX_HZ) return false;
+    *out = (uint32_t)hz;
+    return true;
+}
+
 static void settings_open(void) {
     settings_backup = model.settings;
+    freq_to_text(model.freq_text, sizeof(model.freq_text), model.settings.mt_custom.freq_hz);
 
     if (model.settings.has_location) {
         char buf[SET_COORD_MAX + 1];
@@ -1429,8 +1478,35 @@ static bool settings_commit(void) {
         model.settings.has_location = false;
     }
 
+    // Only meaningful on Custom, but validated whenever it has been typed --
+    // saving a rejected frequency silently would leave the field showing one
+    // thing and the radio using another.
+    if (model.settings.mt_profile == MT_PROFILE_CUSTOM) {
+        uint32_t hz = 0;
+        if (!text_to_freq(model.freq_text, &hz)) {
+            toast("frequency must be %lu-%lu MHz", (unsigned long)(MT_FREQ_MIN_HZ / 1000000u),
+                  (unsigned long)(MT_FREQ_MAX_HZ / 1000000u));
+            return false;
+        }
+        model.settings.mt_custom.freq_hz = hz;
+    }
+
     settings_save_config(&model);
     apply_settings();
+
+    // The modem settings only reach the radio at a retune, and the network
+    // switch that normally causes one may be a long way off.
+    if (model.active == MESH_MT) {
+        mt_radio_t before, after;
+        mt_radio_resolve(&settings_backup, &before);
+        mt_radio_resolve(&model.settings, &after);
+        if (memcmp(&before, &after, sizeof(before)) != 0 || settings_backup.mt_power != model.settings.mt_power) {
+            char described[64];
+            mt_radio_describe(&model.settings, described, sizeof(described));
+            session_log("radio.mt %s pwr%u", described, (unsigned)model.settings.mt_power);
+            apply_active_net();
+        }
+    }
     return true;
 }
 
@@ -1470,6 +1546,50 @@ static void setting_step(setting_field_t field, int delta) {
             model.mt_active_hops = s->mt_default_hops;
             break;
         }
+        case SET_FIELD_MT_RADIO: {
+            int v = (int)s->mt_profile + delta;
+            if (v < 0) v = MT_PROFILE_COUNT - 1;
+            if (v >= MT_PROFILE_COUNT) v = 0;
+            s->mt_profile = (uint8_t)v;
+            // Custom shows four more rows and hides them again.
+            clamp_setting_index();
+            break;
+        }
+        case SET_FIELD_MT_SF: {
+            int v = (int)s->mt_custom.sf + delta;
+            if (v < MT_SF_MIN) v = MT_SF_MIN;
+            if (v > MT_SF_MAX) v = MT_SF_MAX;
+            s->mt_custom.sf = (uint8_t)v;
+            break;
+        }
+        case SET_FIELD_MT_CR: {
+            int v = (int)s->mt_custom.cr + delta;
+            if (v < MT_CR_MIN) v = MT_CR_MIN;
+            if (v > MT_CR_MAX) v = MT_CR_MAX;
+            s->mt_custom.cr = (uint8_t)v;
+            break;
+        }
+        case SET_FIELD_MT_BW: {
+            // Stepped through the valid set rather than typed: the driver takes
+            // a nominal label, and an unrecognised one falls through to 125 kHz
+            // and hears nothing.
+            int at = 0;
+            for (int i = 0; i < MT_BW_COUNT; i++) {
+                if (mt_bw_values[i] == s->mt_custom.bw) at = i;
+            }
+            at += delta;
+            if (at < 0) at = 0;
+            if (at >= MT_BW_COUNT) at = MT_BW_COUNT - 1;
+            s->mt_custom.bw = mt_bw_values[at];
+            break;
+        }
+        case SET_FIELD_MT_POWER: {
+            int v = (int)s->mt_power + delta;
+            if (v < MT_POWER_MIN) v = MT_POWER_MIN;
+            if (v > MT_POWER_MAX) v = MT_POWER_MAX;
+            s->mt_power = (uint8_t)v;
+            break;
+        }
         case SET_FIELD_MT_ROLE:
             s->mt_role = s->mt_role == MT_ROLE_CLIENT ? MT_ROLE_CLIENT_MUTE : MT_ROLE_CLIENT;
             // CLIENT_MUTE takes two rows away with it, so a cursor sitting on
@@ -1491,6 +1611,10 @@ static char* setting_focused_text(int* out_max) {
     *out_max = SET_COORD_MAX;
     if (fields[model.setting_index] == SET_FIELD_LATITUDE) return model.lat_text;
     if (fields[model.setting_index] == SET_FIELD_LONGITUDE) return model.lon_text;
+    if (fields[model.setting_index] == SET_FIELD_MT_FREQ) {
+        *out_max = SET_FREQ_MAX;
+        return model.freq_text;
+    }
     return NULL;
 }
 

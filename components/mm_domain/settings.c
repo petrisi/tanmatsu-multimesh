@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "settings.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
@@ -86,6 +87,35 @@ static bool read_blob(const char* key, void* out, size_t expected) {
         ESP_LOGW(TAG, "%s is %u bytes, expected %u -- discarding", key, (unsigned)size, (unsigned)expected);
         return false;
     }
+    return true;
+}
+
+// As read_blob, but accepts a record written by an older build that had fewer
+// fields: the leading bytes are read and the rest is left at whatever the
+// caller pre-filled, which is the caller's defaults.
+//
+// Only safe for a record that grows by appending, and only because the version
+// byte still guards a change of meaning. Adding a field used to resize the
+// blob, fail the exact-size check and silently discard everything -- which is
+// how location, hop limit and role reset three times.
+static bool read_blob_growable(const char* key, void* out, size_t full_size, size_t* out_read) {
+    if (!available) return false;
+
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return false;
+
+    size_t    size = full_size;
+    esp_err_t res  = nvs_get_blob(handle, key, out, &size);
+    nvs_close(handle);
+
+    if (res != ESP_OK) return false;
+    if (size > full_size) {
+        // Written by a newer build. The tail means nothing to us and the
+        // version byte cannot vouch for it, so do not guess.
+        ESP_LOGW(TAG, "%s is %u bytes, newer than this build understands -- ignoring", key, (unsigned)size);
+        return false;
+    }
+    if (out_read) *out_read = size;
     return true;
 }
 
@@ -233,7 +263,20 @@ typedef struct __attribute__((packed)) {
     uint8_t mc_repeater;
     uint8_t mt_always_repeat;
     uint8_t mt_optimize_text;
+    // Appended after the growable read was introduced. A record written before
+    // these existed is short, and the fields below keep their defaults rather
+    // than the whole record being thrown away. Append only; never reorder.
+    uint8_t  mt_profile;
+    uint8_t  mt_power;
+    uint32_t mt_custom_freq;
+    uint8_t  mt_custom_sf;
+    uint8_t  mt_custom_cr;
+    uint16_t mt_custom_bw;
 } stored_config_t;
+
+// Offset of the first field a short record may be missing. Anything read at
+// least this long has every field up to it.
+#define CONFIG_V1_SIZE offsetof(stored_config_t, mt_profile)
 
 void settings_save_config(const app_model_t* model) {
     const settings_t* s      = &model->settings;
@@ -249,14 +292,23 @@ void settings_save_config(const app_model_t* model) {
           .mc_repeater         = s->mc_repeater ? 1 : 0,
           .mt_always_repeat    = s->mt_always_repeat ? 1 : 0,
           .mt_optimize_text    = s->mt_optimize_text ? 1 : 0,
+          .mt_profile          = s->mt_profile,
+          .mt_power            = s->mt_power,
+          .mt_custom_freq      = s->mt_custom.freq_hz,
+          .mt_custom_sf        = s->mt_custom.sf,
+          .mt_custom_cr        = s->mt_custom.cr,
+          .mt_custom_bw        = s->mt_custom.bw,
     };
     write_blob(KEY_CONFIG, &stored, sizeof(stored));
 }
 
 static void load_config(app_model_t* model) {
-    stored_config_t stored;
-    if (!read_blob(KEY_CONFIG, &stored, sizeof(stored))) return;
-    if (stored.version != STORED_VERSION) {
+    // Pre-filled with the defaults model_init() set, so anything a short record
+    // does not reach keeps them.
+    stored_config_t stored = {0};
+    size_t          read   = 0;
+    if (!read_blob_growable(KEY_CONFIG, &stored, sizeof(stored), &read)) return;
+    if (read < CONFIG_V1_SIZE || stored.version != STORED_VERSION) {
         ESP_LOGW(TAG, "configuration record unusable -- keeping defaults");
         return;
     }
@@ -279,6 +331,30 @@ static void load_config(app_model_t* model) {
     // settings as they left them.
     s->mt_always_repeat = stored.mt_always_repeat != 0;
     s->mt_optimize_text = stored.mt_optimize_text != 0;
+
+    // Only if the record is long enough to carry them; an older one leaves the
+    // defaults model_init() put there.
+    if (read >= sizeof(stored_config_t)) {
+        // Clamped, because a stored profile index this build does not have
+        // would otherwise resolve to nothing and transmit on garbage.
+        s->mt_profile = stored.mt_profile < MT_PROFILE_COUNT ? stored.mt_profile : MT_PROFILE_EFL_EU;
+        s->mt_power   = stored.mt_power >= MT_POWER_MIN && stored.mt_power <= MT_POWER_MAX ? stored.mt_power
+                                                                                           : MT_POWER_DEFAULT;
+
+        mt_radio_t c = {.freq_hz = stored.mt_custom_freq,
+                        .sf      = stored.mt_custom_sf,
+                        .cr      = stored.mt_custom_cr,
+                        .bw      = stored.mt_custom_bw};
+        bool usable  = c.freq_hz >= MT_FREQ_MIN_HZ && c.freq_hz <= MT_FREQ_MAX_HZ && c.sf >= MT_SF_MIN &&
+                      c.sf <= MT_SF_MAX && c.cr >= MT_CR_MIN && c.cr <= MT_CR_MAX && mt_bw_label(c.bw)[0] != '?';
+        if (usable) {
+            s->mt_custom = c;
+        } else {
+            ESP_LOGW(TAG, "stored custom radio settings unusable -- seeding from the default profile");
+            if (s->mt_profile == MT_PROFILE_CUSTOM) s->mt_profile = MT_PROFILE_EFL_EU;
+            mt_radio_resolve(s, &s->mt_custom);
+        }
+    }
 
     // The active limit always starts from the stored default; a session that
     // raised it does not get to make that permanent by outliving the reboot.

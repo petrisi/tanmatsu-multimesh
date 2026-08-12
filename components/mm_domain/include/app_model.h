@@ -363,6 +363,68 @@ typedef enum {
     MT_ROLE_CLIENT_MUTE = 1,  // hears everything, forwards nothing
 } mt_role_t;
 
+// --- Meshtastic radio profiles -------------------------------------------
+//
+// The frequency is a stored constant, not something derived at runtime.
+// Upstream computes it as
+//
+//   slot_width = spacing + 2*padding + bandwidth
+//   freq       = band_start + bandwidth/2 + padding + slot * slot_width
+//
+// where spacing and padding come from a per-region profile: zero for EU_868,
+// 10.4 kHz for the narrow EU region, 37.5 kHz with 0.4 MHz spacing for the
+// 866 one. Reimplementing that means owning three sets of constants whose
+// mistakes are silent -- a wrong padding term lands you 10 kHz off with no
+// error anywhere. So each profile carries a frequency that has been tested,
+// and the slot is recorded alongside it as documentation: enough to check
+// against another client without us doing the arithmetic.
+typedef enum {
+    MT_PROFILE_EFL_EU = 0,
+    MT_PROFILE_LONGFAST_EU,
+    MT_PROFILE_CUSTOM,
+    MT_PROFILE_COUNT,
+} mt_profile_id_t;
+
+// Modem settings in force. Sync word and preamble are not here: every
+// Meshtastic profile uses 0x2B and 16, and upstream declares the sync word
+// const. A setting that cannot vary is not a setting.
+typedef struct {
+    uint32_t freq_hz;
+    uint8_t  sf;
+    uint8_t  cr;   // the divisor: 5 means 4/5
+    uint16_t bw;   // the driver's nominal label -- 62 means 62.5 kHz
+} mt_radio_t;
+
+typedef struct {
+    const char* name;
+    mt_radio_t  radio;
+    const char* bw_label;  // "62.5", because 62 is a label and printing it lies
+    uint8_t     slot;      // 1-based, for display only
+    uint8_t     slots;
+} mt_profile_t;
+
+#define MT_SF_MIN 7
+#define MT_SF_MAX 12
+#define MT_CR_MIN 5
+#define MT_CR_MAX 8
+#define MT_POWER_MIN 2
+#define MT_POWER_MAX 22  // the module's ceiling; EU_868 would permit 27
+#define MT_POWER_DEFAULT 22
+#define MT_FREQ_MIN_HZ 150000000u  // SX1262 sub-GHz range
+#define MT_FREQ_MAX_HZ 960000000u
+
+// The bandwidths the driver understands. Anything else falls through to its
+// 125 kHz default and hears nothing, so this is a list to step through rather
+// than a number to type.
+#define MT_BW_COUNT 4
+extern const uint16_t mt_bw_values[MT_BW_COUNT];
+const char* mt_bw_label(uint16_t bw);
+
+// NULL for MT_PROFILE_CUSTOM, which has no fixed settings, and for anything
+// out of range.
+const mt_profile_t* mt_profile_at(int id);
+const char*         mt_profile_name(int id);
+
 #define SET_HOPS_MAX_STORED  5  // what may be made permanent
 #define SET_HOPS_MAX_SESSION 7  // what the wire allows, reachable per session
 #define SET_DISPLAY_OFF_DEFAULT 5
@@ -389,6 +451,14 @@ typedef struct {
     uint8_t mt_default_hops;
     uint8_t mt_role;  // mt_role_t
 
+    // Which modem profile, and the settings behind MT_PROFILE_CUSTOM. Transmit
+    // power is separate from the profile: it is a regulatory and battery
+    // decision, not part of what makes a mesh reachable, and it applies the
+    // same whichever profile is chosen.
+    uint8_t    mt_profile;  // mt_profile_id_t
+    uint8_t    mt_power;    // dBm
+    mt_radio_t mt_custom;
+
     // Both only mean anything at MT_ROLE_CLIENT, and both are off by default,
     // which is where a plain Meshtastic CLIENT sits.
     //
@@ -410,6 +480,12 @@ typedef enum {
     SET_FIELD_LONGITUDE,
     SET_FIELD_DISPLAY_OFF,
     SET_FIELD_KBD_OFF,
+    SET_FIELD_MT_RADIO,
+    SET_FIELD_MT_FREQ,
+    SET_FIELD_MT_SF,
+    SET_FIELD_MT_BW,
+    SET_FIELD_MT_CR,
+    SET_FIELD_MT_POWER,
     SET_FIELD_MT_HOPS,
     SET_FIELD_MT_ROLE,
     SET_FIELD_MT_ALWAYS_REPEAT,
@@ -419,6 +495,16 @@ typedef enum {
 } setting_field_t;
 
 #define SET_COORD_MAX 12  // "-179.123456"
+#define SET_FREQ_MAX  12  // "869.431250"
+
+// The settings actually in force, resolved from the chosen profile or from the
+// custom values, and a one-line description of them.
+void mt_radio_resolve(const settings_t* settings, mt_radio_t* out);
+
+// "869.43125 MHz SF8 BW62.5 CR4:8 slot 1/4" -- everything the modem was told,
+// in one string, so what is on screen is what went to the radio. Used by the
+// settings note, the boot log and the session log alike.
+void mt_radio_describe(const settings_t* settings, char* out, size_t out_size);
 
 // Fill `out` with the visible fields in order and return how many. Shared ones
 // first, then whichever network's own settings apply.
@@ -463,6 +549,7 @@ typedef struct {
     int  setting_index;
     char lat_text[SET_COORD_MAX + 1];
     char lon_text[SET_COORD_MAX + 1];
+    char freq_text[SET_FREQ_MAX + 1];
 
     // Nodes view: which node is selected, as a slot in the node table rather
     // than a row on screen. -1 is the "this radio" row pinned above the list.

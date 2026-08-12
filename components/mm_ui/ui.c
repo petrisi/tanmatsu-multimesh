@@ -1639,6 +1639,32 @@ static void setting_row(const app_model_t* model, setting_field_t field, char* l
                 snprintf(value, value_size, "%u min", (unsigned)s->kbd_off_minutes);
             }
             break;
+        case SET_FIELD_MT_RADIO:
+            snprintf(label, label_size, "Radio");
+            snprintf(value, value_size, "%s", mt_profile_name(s->mt_profile));
+            *col = s->mt_profile == MT_PROFILE_CUSTOM ? COL_WARN : COL_TEXT;
+            break;
+        case SET_FIELD_MT_FREQ:
+            snprintf(label, label_size, "Frequency");
+            snprintf(value, value_size, "%s MHz", model->freq_text[0] ? model->freq_text : "?");
+            if (!model->freq_text[0]) *col = COL_DIM;
+            break;
+        case SET_FIELD_MT_SF:
+            snprintf(label, label_size, "Spreading");
+            snprintf(value, value_size, "SF%u", (unsigned)s->mt_custom.sf);
+            break;
+        case SET_FIELD_MT_BW:
+            snprintf(label, label_size, "Bandwidth");
+            snprintf(value, value_size, "%s kHz", mt_bw_label(s->mt_custom.bw));
+            break;
+        case SET_FIELD_MT_CR:
+            snprintf(label, label_size, "Coding rate");
+            snprintf(value, value_size, "4:%u", (unsigned)s->mt_custom.cr);
+            break;
+        case SET_FIELD_MT_POWER:
+            snprintf(label, label_size, "Power");
+            snprintf(value, value_size, "%u dBm", (unsigned)s->mt_power);
+            break;
         case SET_FIELD_MT_HOPS:
             snprintf(label, label_size, "Hop limit");
             // Both numbers, because they differ whenever a session has raised
@@ -1682,12 +1708,21 @@ static void draw_settings(const app_model_t* model) {
     setting_field_t fields[SET_FIELD_COUNT];
     int             count = settings_visible_fields(model->active, &model->settings, fields, SET_FIELD_COUNT);
 
-    float bw = 52 * CHAR_W;
-    float bh = LINE_H * (count + 8) + 12;
+    // Capped, because the list grows: Custom modem settings on Meshtastic take
+    // it to fourteen rows, which would size the box past the height of the
+    // screen. Scrolls like the nodes list rather than resizing without limit.
+#define SET_ROWS_MAX 10
+    int   rows = count < SET_ROWS_MAX ? count : SET_ROWS_MAX;
+    float bw   = 52 * CHAR_W;
+    float bh   = LINE_H * (rows + 8) + 12;
     float bx, by;
 
     char title[40];
-    snprintf(title, sizeof(title), "Settings - %s", mesh->name);
+    if (count > rows) {
+        snprintf(title, sizeof(title), "Settings - %s  %d/%d", mesh->name, model->setting_index + 1, count);
+    } else {
+        snprintf(title, sizeof(title), "Settings - %s", mesh->name);
+    }
     overlay_box(bw, bh, &bx, &by, mesh->accent, title);
 
     float y = by + 8 + LINE_H * 1.5f;
@@ -1697,10 +1732,16 @@ static void draw_settings(const app_model_t* model) {
     // the column.
     float vx = bx + 14 + 17 * CHAR_W;
 
-    for (int i = 0; i < count; i++, y += LINE_H) {
+    // Scroll so the selection stays visible.
+    int first = 0;
+    if (model->setting_index >= rows) first = model->setting_index - rows + 1;
+    if (first > count - rows) first = count - rows;
+    if (first < 0) first = 0;
+
+    for (int i = first; i < count && i < first + rows; i++, y += LINE_H) {
         // The network's own settings are separated from the shared ones, so it
         // is never a guess which of the two a row belongs to.
-        if (fields[i] == SET_FIELD_MT_HOPS || fields[i] == SET_FIELD_MC_REPEATER) {
+        if (fields[i] == SET_FIELD_MT_RADIO || fields[i] == SET_FIELD_MC_REPEATER) {
             pax_draw_line(&fb, COL_SEP, bx + 10, y - 3, bx + bw - 10, y - 3);
         }
         if (i == model->setting_index) pax_draw_rect(&fb, COL_SEL, bx + 6, y - 2, bw - 12, LINE_H);
@@ -1714,17 +1755,34 @@ static void draw_settings(const app_model_t* model) {
         // A cursor on the coordinate rows, because those are typed rather than
         // stepped and otherwise look inert.
         if (i == model->setting_index &&
-            (fields[i] == SET_FIELD_LATITUDE || fields[i] == SET_FIELD_LONGITUDE)) {
-            const char* txt = fields[i] == SET_FIELD_LATITUDE ? model->lat_text : model->lon_text;
+            (fields[i] == SET_FIELD_LATITUDE || fields[i] == SET_FIELD_LONGITUDE ||
+             fields[i] == SET_FIELD_MT_FREQ)) {
+            const char* txt = fields[i] == SET_FIELD_LATITUDE   ? model->lat_text
+                              : fields[i] == SET_FIELD_LONGITUDE ? model->lon_text
+                                                                 : model->freq_text;
             pax_draw_rect(&fb, COL_TEXT, vx + (float)strlen(txt) * CHAR_W, y + 3, 2, LINE_H - 6);
         }
     }
 
+    // Keep the note where it belongs even when the list is shorter than the box.
+    y = by + 8 + LINE_H * 1.5f + LINE_H * rows;
     y += 4;
     // What the selected row actually does, since several of these are not
     // obvious and one of them transmits your location to strangers.
+    // The radio rows describe themselves: one string carrying everything the
+    // modem was told, so what is on screen is what went to the air.
+    char described[64];
     const char* note = "";
     switch (fields[model->setting_index < count ? model->setting_index : 0]) {
+        case SET_FIELD_MT_RADIO:
+        case SET_FIELD_MT_FREQ:
+        case SET_FIELD_MT_SF:
+        case SET_FIELD_MT_BW:
+        case SET_FIELD_MT_CR:
+            mt_radio_describe(&model->settings, described, sizeof(described));
+            note = described;
+            break;
+        case SET_FIELD_MT_POWER: note = "transmit power; the module stops at 22 dBm"; break;
         case SET_FIELD_LATITUDE:
         case SET_FIELD_LONGITUDE: note = "sent in every MeshCore advert once set"; break;
         case SET_FIELD_DISPLAY_OFF: note = "backlight only - radio keeps running"; break;

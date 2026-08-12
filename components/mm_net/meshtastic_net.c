@@ -512,13 +512,28 @@ static bool meshtastic_init(void) {
     return true;
 }
 
+// The modem settings in force, pushed in from the configuration screen rather
+// than read from the model, so the stack stays a consumer of settings.
+// Defaults match the EdgeFastLow profile in case the radio is configured before
+// the first apply_settings().
+static mt_radio_t active_radio = {.freq_hz = EFL_FREQUENCY, .sf = EFL_SF, .cr = EFL_CODING_RATE, .bw = EFL_BANDWIDTH};
+static uint8_t    active_power = EFL_POWER;
+
+void mt_set_radio(const mt_radio_t* radio, uint8_t power) {
+    if (radio) active_radio = *radio;
+    active_power = power;
+}
+
 static void meshtastic_get_config(lora_protocol_config_params_t* out) {
     memset(out, 0, sizeof(*out));
-    out->frequency                  = EFL_FREQUENCY;
-    out->spreading_factor           = EFL_SF;
-    out->bandwidth                  = EFL_BANDWIDTH;
-    out->coding_rate                = EFL_CODING_RATE;
-    out->power                      = EFL_POWER;
+    out->frequency                  = active_radio.freq_hz;
+    out->spreading_factor           = active_radio.sf;
+    out->bandwidth                  = active_radio.bw;
+    out->coding_rate                = active_radio.cr;
+    out->power                      = active_power;
+    // Not configurable, and not per-profile: every Meshtastic node uses these.
+    // Upstream declares the sync word const and picks the preamble from whether
+    // the band is above 2 GHz, which ours never is.
     out->preamble_length            = EFL_PREAMBLE;
     out->sync_word                  = EFL_SYNC_WORD;
     out->rx_boost                   = true;

@@ -55,6 +55,13 @@ void model_init(app_model_t* model) {
     // other people's traffic, and we do not. Advertising CLIENT would invite
     // neighbours to route through a node that silently drops everything.
     model->settings.mt_role   = MT_ROLE_CLIENT_MUTE;
+
+    model->settings.mt_profile = MT_PROFILE_EFL_EU;
+    model->settings.mt_power   = MT_POWER_DEFAULT;
+    // Seeded from the default profile so choosing Custom starts from something
+    // that works rather than from zeros.
+    mt_radio_resolve(&model->settings, &model->settings.mt_custom);
+
     model->settings.mc_repeater = false;
     model->mt_active_hops       = model->settings.mt_default_hops;
 }
@@ -67,6 +74,15 @@ int settings_visible_fields(mesh_id_t active, const settings_t* settings, settin
     for (size_t i = 0; i < sizeof(shared) / sizeof(shared[0]) && n < max; i++) out[n++] = shared[i];
 
     if (active == MESH_MT) {
+        if (n < max) out[n++] = SET_FIELD_MT_RADIO;
+        // The modem settings themselves, only where they are editable.
+        if (settings != NULL && settings->mt_profile == MT_PROFILE_CUSTOM) {
+            if (n < max) out[n++] = SET_FIELD_MT_FREQ;
+            if (n < max) out[n++] = SET_FIELD_MT_SF;
+            if (n < max) out[n++] = SET_FIELD_MT_BW;
+            if (n < max) out[n++] = SET_FIELD_MT_CR;
+        }
+        if (n < max) out[n++] = SET_FIELD_MT_POWER;
         if (n < max) out[n++] = SET_FIELD_MT_HOPS;
         if (n < max) out[n++] = SET_FIELD_MT_ROLE;
         // Only a CLIENT relays, so only a CLIENT gets to say how.

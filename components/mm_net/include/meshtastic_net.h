@@ -31,6 +31,14 @@ void mt_set_hop_limit(uint8_t hops);
 // What we advertise ourselves as in NodeInfo.
 void mt_set_role(uint8_t role);
 
+// The modem settings to use, resolved from the chosen profile or the custom
+// values. Takes effect at the next retune, which the event loop performs when
+// the settings are saved and on switching to this network.
+//
+// Sync word and preamble are not here: they are the same for every Meshtastic
+// profile and stay in the stack.
+void mt_set_radio(const mt_radio_t* radio, uint8_t power);
+
 // Whether, and how, we forward other people's packets.
 //
 //   enabled        the role is CLIENT. CLIENT_MUTE forwards nothing, which is

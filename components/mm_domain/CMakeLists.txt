@@ -2,7 +2,7 @@
 # renders and the network stacks write into. Deliberately knows nothing about
 # either protocol or about drawing.
 idf_component_register(
-    SRCS "model.c" "settings.c" "nodestore.c"
+    SRCS "model.c" "settings.c" "nodestore.c" "mt_profiles.c"
     INCLUDE_DIRS "include"
     REQUIRES pax-gfx
     # fatfs for the node store on the internal partition; NVS holds only the
