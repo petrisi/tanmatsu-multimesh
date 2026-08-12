@@ -304,6 +304,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  mt_custom_cr;
     uint16_t mt_custom_bw;
     uint8_t  brightness;
+    uint8_t  kbd_brightness;
 } stored_config_t;
 
 // Offset of the first field a short record may be missing. Anything read at
@@ -331,6 +332,7 @@ void settings_save_config(const app_model_t* model) {
           .mt_custom_cr        = s->mt_custom.cr,
           .mt_custom_bw        = s->mt_custom.bw,
           .brightness          = s->brightness,
+          .kbd_brightness      = s->kbd_brightness,
     };
     write_blob(KEY_CONFIG, &stored, sizeof(stored));
 }
@@ -394,6 +396,10 @@ static void load_config(app_model_t* model) {
                                                     stored.brightness <= SET_BRIGHTNESS_MAX))
                             ? stored.brightness
                             : SET_BRIGHTNESS_MAX;
+        s->kbd_brightness = (stored.kbd_brightness == 0 || (stored.kbd_brightness >= SET_BRIGHTNESS_MIN &&
+                                                            stored.kbd_brightness <= SET_BRIGHTNESS_MAX))
+                                ? stored.kbd_brightness
+                                : SET_BRIGHTNESS_MAX;
     }
 
     // The active limit always starts from the stored default; a session that

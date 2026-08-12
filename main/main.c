@@ -1302,12 +1302,16 @@ static void handle_node_short_key(bsp_input_navigation_key_t key) {
 static uint32_t last_input_ms;
 static bool     screen_dark;
 static bool     kbd_dark;
-static uint8_t  kbd_brightness = 100;  // read once in screen_power_init()
 
-// The setting is a perceived level; the backlight wants a duty cycle. Every
-// place that lights the screen goes through here so the two never diverge.
+// Both settings are perceived levels; both backlights want a duty cycle. Every
+// place that lights either one goes through these, so a level and what reaches
+// the hardware can never diverge.
 static void screen_apply_brightness(void) {
     bsp_display_set_backlight_brightness(brightness_duty(model.settings.brightness));
+}
+
+static void kbd_apply_brightness(void) {
+    bsp_input_set_backlight_brightness(brightness_duty(model.settings.kbd_brightness));
 }
 
 static void screen_power_init(void) {
@@ -1322,10 +1326,12 @@ static void screen_power_init(void) {
     }
     screen_apply_brightness();
 
-    // The keyboard has no setting of its own, so its level is simply whatever
-    // the device was on. A failed read leaves the 100% default: too bright is
-    // recoverable from the launcher, too dim is what we are fixing.
-    if (bsp_input_get_backlight_brightness(&current) == ESP_OK && current > 0) kbd_brightness = current;
+    if (model.settings.kbd_brightness == 0) {
+        model.settings.kbd_brightness = (bsp_input_get_backlight_brightness(&current) == ESP_OK && current > 0)
+                                            ? brightness_level_for_duty(current)
+                                            : SET_BRIGHTNESS_MAX;
+    }
+    kbd_apply_brightness();
 }
 
 // Put the keyboard back to the level it was found at. Also called on the way
@@ -1333,7 +1339,7 @@ static void screen_power_init(void) {
 // like a fault, and the only cure is a menu the user has no reason to visit.
 static void kbd_restore(void) {
     if (!kbd_dark) return;
-    bsp_input_set_backlight_brightness(kbd_brightness);
+    kbd_apply_brightness();
     kbd_dark = false;
 }
 
@@ -1566,6 +1572,15 @@ static void setting_step(setting_field_t field, int delta) {
             screen_dark = false;
             break;
         }
+        case SET_FIELD_KBD_BRIGHTNESS: {
+            int v = (int)s->kbd_brightness + delta * SET_BRIGHTNESS_STEP;
+            if (v < SET_BRIGHTNESS_MIN) v = SET_BRIGHTNESS_MIN;
+            if (v > SET_BRIGHTNESS_MAX) v = SET_BRIGHTNESS_MAX;
+            s->kbd_brightness = (uint8_t)v;
+            kbd_apply_brightness();
+            kbd_dark = false;
+            break;
+        }
         case SET_FIELD_DISPLAY_OFF: {
             int v = (int)s->display_off_minutes + delta;
             if (v < 0) v = 0;
@@ -1701,9 +1716,10 @@ static void handle_settings_key(bsp_input_navigation_key_t key) {
             // unusable until the next reboot, on both networks.
             model.settings = settings_backup;
             apply_settings();
-            // Brightness is applied while it is being stepped, so cancelling has
-            // to put the screen back as well as the setting.
+            // Both are applied while being stepped, so cancelling has to put the
+            // hardware back as well as the setting.
             screen_apply_brightness();
+            kbd_apply_brightness();
             model.overlay = OVERLAY_NONE;
             break;
         default: break;

@@ -92,7 +92,8 @@ uint8_t brightness_level_for_duty(uint8_t duty) {
 
 int settings_visible_fields(mesh_id_t active, const settings_t* settings, setting_field_t* out, int max) {
     static const setting_field_t shared[] = {SET_FIELD_LATITUDE, SET_FIELD_LONGITUDE, SET_FIELD_BRIGHTNESS,
-                                            SET_FIELD_DISPLAY_OFF, SET_FIELD_KBD_OFF};
+                                            SET_FIELD_DISPLAY_OFF, SET_FIELD_KBD_BRIGHTNESS,
+                                            SET_FIELD_KBD_OFF};
 
     int n = 0;
     for (size_t i = 0; i < sizeof(shared) / sizeof(shared[0]) && n < max; i++) out[n++] = shared[i];

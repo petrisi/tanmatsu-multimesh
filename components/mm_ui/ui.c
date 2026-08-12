@@ -1625,6 +1625,10 @@ static void setting_row(const app_model_t* model, setting_field_t field, char* l
             snprintf(label, label_size, "Brightness");
             snprintf(value, value_size, "%u%%", (unsigned)s->brightness);
             break;
+        case SET_FIELD_KBD_BRIGHTNESS:
+            snprintf(label, label_size, "Key light");
+            snprintf(value, value_size, "%u%%", (unsigned)s->kbd_brightness);
+            break;
         case SET_FIELD_DISPLAY_OFF:
             snprintf(label, label_size, "Screen off");
             if (s->display_off_minutes == 0) {
@@ -1794,6 +1798,11 @@ static void draw_settings(const app_model_t* model) {
             // seeing both is what makes an odd-looking step explicable.
             snprintf(described, sizeof(described), "backlight duty %u%%, applied as you step it",
                      (unsigned)brightness_duty(model->settings.brightness));
+            note = described;
+            break;
+        case SET_FIELD_KBD_BRIGHTNESS:
+            snprintf(described, sizeof(described), "key backlight duty %u%%, applied as you step it",
+                     (unsigned)brightness_duty(model->settings.kbd_brightness));
             note = described;
             break;
         case SET_FIELD_DISPLAY_OFF: note = "backlight only - radio keeps running"; break;

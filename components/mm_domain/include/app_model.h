@@ -465,7 +465,8 @@ typedef struct {
     int32_t latitude;
     int32_t longitude;
 
-    uint8_t brightness;           // screen backlight percent, 0 = not chosen yet
+    uint8_t brightness;           // screen backlight level, 0 = not chosen yet
+    uint8_t kbd_brightness;       // keyboard backlight level, 0 = not chosen yet
     uint8_t display_off_minutes;  // 0 = never
     uint8_t kbd_off_minutes;      // keyboard backlight, 0 = never
 
@@ -503,6 +504,7 @@ typedef enum {
     SET_FIELD_LONGITUDE,
     SET_FIELD_BRIGHTNESS,
     SET_FIELD_DISPLAY_OFF,
+    SET_FIELD_KBD_BRIGHTNESS,
     SET_FIELD_KBD_OFF,
     SET_FIELD_MT_RADIO,
     SET_FIELD_MT_FREQ,
