@@ -2,6 +2,8 @@
 
 #include "settings.h"
 #include <stddef.h>
+#include <stdlib.h>
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
@@ -70,6 +72,35 @@ bool settings_init(void) {
 
 static const char* channels_key(mesh_id_t mesh) {
     return mesh == MESH_MT ? KEY_CHANNELS_MT : KEY_CHANNELS_MC;
+}
+
+// The launcher's namespace, read and never written -- the same rule the radio
+// settings follow. Two apps writing one key set is how configuration
+// mysteriously changes.
+#define SYSTEM_NAMESPACE "system"
+#define KEY_TZ           "tz"
+#define TZ_STRING_MAX    64  // matches the launcher's TIMEZONE_TZ_LEN
+
+bool settings_apply_timezone(void) {
+    char tz[TZ_STRING_MAX] = {0};
+    bool found             = false;
+
+    // Not gated on `available`: that flag reports our own namespace, and this
+    // one belongs to the launcher and exists independently of it.
+    nvs_handle_t handle;
+    if (nvs_open(SYSTEM_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        size_t size = sizeof(tz);
+        if (nvs_get_str(handle, KEY_TZ, tz, &size) == ESP_OK && tz[0] != '\0') found = true;
+        nvs_close(handle);
+    }
+
+    // "UTC0" is the POSIX form, and the string the launcher's own Etc/UTC entry
+    // carries -- so an unset device agrees with it exactly.
+    setenv("TZ", found ? tz : "UTC0", 1);
+    tzset();
+
+    ESP_LOGI(TAG, "timezone %s (%s)", found ? tz : "UTC0", found ? "device setting" : "no device setting");
+    return found;
 }
 
 static bool read_blob(const char* key, void* out, size_t expected) {

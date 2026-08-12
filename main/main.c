@@ -8,7 +8,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/time.h>
 #include <time.h>
 #include "app_model.h"
 #include "bsp/device.h"
@@ -1445,6 +1444,11 @@ static void settings_open(void) {
     settings_backup = model.settings;
     freq_to_text(model.freq_text, sizeof(model.freq_text), model.settings.mt_custom.freq_hz);
 
+    // Re-read the device timezone here: it is set in the launcher, so the
+    // likeliest moment for it to have changed since we started is exactly when
+    // somebody has come looking for settings.
+    settings_apply_timezone();
+
     if (model.settings.has_location) {
         char buf[SET_COORD_MAX + 1];
         coord_to_text(buf, sizeof(buf), model.settings.latitude);
@@ -1928,13 +1932,15 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(bsp_input_get_queue(&input_event_queue));
 
-    setenv("TZ", "EET-2EEST,M3.5.0/3,M10.5.0/4", 1);
-    tzset();
+    // Whatever the launcher is set to, not a constant that happens to match it.
+    settings_apply_timezone();
 
-    // No radio in this build, so no coprocessor RTC read. Seed a plausible wall
-    // clock so the timestamp column shows something meaningful.
-    struct timeval tv = {.tv_sec = 1785000000, .tv_usec = 0};
-    settimeofday(&tv, NULL);
+    // The clock is deliberately left at zero until the coprocessor RTC is read
+    // below. It used to be seeded with a plausible-looking timestamp so the
+    // message column had something to show, which meant a failed RTC read
+    // produced convincing wrong dates -- and those get written into the node
+    // table as last-heard and outlive the session. An obviously wrong 1970 is a
+    // better failure than a quietly wrong 2026.
 
     model_init(&model);
     settings_derive_node_id(&model.identity);

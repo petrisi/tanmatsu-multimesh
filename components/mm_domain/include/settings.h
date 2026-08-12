@@ -22,6 +22,20 @@
 // defaults and nothing persists.
 bool settings_init(void);
 
+// Adopt the device's timezone for every time this app renders.
+//
+// The launcher owns it: choosing one writes the display name to `system`/
+// `timezone` and the POSIX string to `system`/`tz`, then applies the latter.
+// We read the same string, so the two agree by construction rather than by a
+// constant that happens to match.
+//
+// Falls back to UTC, which is what the launcher itself defaults to. Guessing a
+// country would be wrong far more often than it was right, and wrong quietly.
+//
+// Returns whether a stored timezone was found. Cheap enough to call again
+// whenever it might have changed.
+bool settings_apply_timezone(void);
+
 // Fill `model` from storage. Returns false when nothing was stored yet, leaving
 // the model untouched so the caller can apply defaults.
 bool settings_load(app_model_t* model);
