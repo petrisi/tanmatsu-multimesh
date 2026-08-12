@@ -849,11 +849,14 @@ static void draw_composer(const app_model_t* model) {
 
     // What an empty line can do that is not written anywhere else on screen.
     //
+    // For the first minute of a session only, and only while the line is empty.
+    // Both conditions are about being useful without becoming furniture: after
+    // a minute the reader either knows these or is not looking at that corner,
+    // and once there is something to send the row has a better use for the
+    // space.
+    //
     // Here rather than in the hint bar because that bar is full: six keycaps
-    // leave about eighty pixels, and this needs five hundred. The composer row
-    // is empty at exactly the moment these apply, which is also the only moment
-    // they are worth reading -- they disappear as soon as there is anything to
-    // send.
+    // leave about eighty pixels, and this needs five hundred.
     //
     // Spelled out rather than drawn with symbols: the font is ASCII plus six
     // Finnish letters, so there is no arrow and no return glyph to use.
@@ -861,7 +864,7 @@ static void draw_composer(const app_model_t* model) {
     // In the separator colour, dimmer than the hint bar's, because this is a
     // reminder for the person who has forgotten rather than a label for the
     // person who is looking.
-    if (model->composer_len == 0) {
+    if (model->composer_len == 0 && model->show_intro_hints) {
         const char* extras = "ctrl+up/dn recall    hold enter for CQ";
         float       right  = ui_w - 8 - 5 * CHAR_W;  // clear of the byte counter
         float       start  = right - (float)strlen(extras) * CHAR_W;

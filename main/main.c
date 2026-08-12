@@ -661,6 +661,21 @@ static void enter_released(void) {
 // Checked from the event loop so the call goes out the moment the hold is long
 // enough, rather than when the finger lifts -- otherwise there is no way to
 // tell a long press from a slow one until it is over.
+// The empty-line reminders are worth a minute of a session and no more. Kept
+// here because the UI is deliberately ignorant of the clock, and returns true
+// when the value changed so the loop repaints once to take them away -- an idle
+// screen does not redraw on its own.
+#define INTRO_HINT_MS 60000
+
+static uint32_t session_started_ms;
+
+static bool intro_hints_tick(void) {
+    bool show = (now_ms() - session_started_ms) < INTRO_HINT_MS;
+    if (show == model.show_intro_hints) return false;
+    model.show_intro_hints = show;
+    return true;
+}
+
 static bool cq_hold_tick(void) {
     if (enter_down_ms == 0 || enter_fired || !enter_was_empty) return false;
     // Still empty, still the message view: anything typed in the meantime means
@@ -2176,6 +2191,11 @@ void app_main(void) {
         toast("radio unavailable");
     }
 
+    // From here, not from boot: the minute the reminders are worth is a minute
+    // of somebody using the application, and start-up spends several seconds on
+    // self-tests and bringing the radio up.
+    session_started_ms = now_ms();
+
     ui_render(&model);
 
     while (1) {
@@ -2268,6 +2288,7 @@ void app_main(void) {
     woke:
         screen_tick();
         if (cq_hold_tick()) dirty = true;
+        if (intro_hints_tick()) dirty = true;
 
         if (radio_poll()) dirty = true;
         if (drain_tx_events()) dirty = true;

@@ -598,6 +598,14 @@ typedef struct {
     uint32_t repeat_count[MESH_COUNT];
     bool     repeat_busy;  // briefly true after each relay, so the badge blinks
 
+    // Whether to offer the empty-line reminders on the composer row. True for
+    // the first minute of a session and false afterwards: they are for the
+    // person who has forgotten the gestures, and once someone has been using
+    // the app for a minute they either know or are not reading that corner.
+    // Driven by the event loop, which is the only thing here that knows the
+    // time.
+    bool show_intro_hints;
+
     radio_state_t radio;
     int           battery_pct;
     bool          charging;

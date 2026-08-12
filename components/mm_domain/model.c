@@ -43,7 +43,8 @@ void model_init(app_model_t* model) {
         model->mesh[i].selected_seq = -1;
     }
 
-    model->radio       = RADIO_RX;
+    model->radio            = RADIO_RX;
+    model->show_intro_hints = true;  // the event loop retires them after a minute
     model->history_pos = -1;
     model->battery_pct = 100;
     model->time_synced = false;
