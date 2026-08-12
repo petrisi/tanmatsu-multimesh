@@ -28,3 +28,23 @@
 // `out_from_nvs` reports whether any key was actually present, so the UI can
 // say whether we adopted the user's settings or fell back to defaults.
 void radio_cfg_load(lora_protocol_config_params_t* out, bool* out_from_nvs);
+
+// Crystal correction in hertz, from `lora.offset`.
+//
+// Not a preference but a per-device measurement: the launcher's LoRa
+// information screen measures the frequency error against received traffic and
+// stores it there. It applies to the hardware rather than to a network, so it
+// belongs to whichever profile happens to be tuned -- both of ours.
+//
+// At 62.5 kHz bandwidth a few kilohertz of crystal error is a real fraction of
+// the channel, which is exactly the kind of fault that works for everyone
+// except the person whose radio is off.
+int32_t radio_cfg_frequency_offset(void);
+
+// Whether the radio's own automatic frequency correction is enabled, from
+// `lora.autooffset`. Also a hardware behaviour rather than a network setting.
+bool radio_cfg_automatic_correction(void);
+
+// Low data rate optimisation, from `lora.ldro`. Required when a symbol lasts
+// longer than 16 ms, which narrow bandwidths at high spreading factors reach.
+bool radio_cfg_low_data_rate(void);

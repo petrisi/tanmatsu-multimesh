@@ -10,6 +10,38 @@ static const char TAG[] = "radio_cfg";
 
 #define NVS_NAMESPACE "system"
 
+// Small readers for the device-wide keys. Each opens the namespace itself
+// rather than being folded into radio_cfg_load(), because these apply to both
+// networks and so are read where the radio is configured, not where MeshCore's
+// modem settings are assembled.
+static bool system_get_u8(const char* key, uint8_t* out) {
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return false;
+    bool ok = nvs_get_u8(handle, key, out) == ESP_OK;
+    nvs_close(handle);
+    return ok;
+}
+
+int32_t radio_cfg_frequency_offset(void) {
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return 0;
+    int32_t offset = 0;
+    if (nvs_get_i32(handle, "lora.offset", &offset) != ESP_OK) offset = 0;
+    nvs_close(handle);
+    return offset;
+}
+
+bool radio_cfg_automatic_correction(void) {
+    uint8_t value = 0;
+    // The launcher's default is on, so an absent key means on rather than off.
+    return system_get_u8("lora.autooffset", &value) ? value != 0 : true;
+}
+
+bool radio_cfg_low_data_rate(void) {
+    uint8_t value = 0;
+    return system_get_u8("lora.ldro", &value) ? value != 0 : false;
+}
+
 void radio_cfg_load(lora_protocol_config_params_t* out, bool* out_from_nvs) {
     if (out == NULL) return;
 
@@ -25,8 +57,8 @@ void radio_cfg_load(lora_protocol_config_params_t* out, bool* out_from_nvs) {
     out->crc_enabled                = true;
     out->invert_iq                  = false;
     out->use_dcdc                   = true;
-    out->use_automatic_correction   = true;
-    out->low_data_rate_optimization = false;
+    out->use_automatic_correction   = radio_cfg_automatic_correction();
+    out->low_data_rate_optimization = radio_cfg_low_data_rate();
     out->ramp_time                  = 200;
 
     if (out_from_nvs) *out_from_nvs = false;

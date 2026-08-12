@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "radio.h"
+#include "radio_cfg.h"
 #include <string.h>
 #include "esp_log.h"
 #include "esp_random.h"
@@ -72,10 +73,28 @@ bool radio_apply_config(const lora_protocol_config_params_t* config) {
         return false;
     }
 
-    res = lora_set_config(&handle, config);
+    // Automatic frequency correction is a property of this radio rather than of
+    // whichever network is tuned, so it is taken from the device setting here
+    // instead of from each stack's idea of it.
+    lora_protocol_config_params_t applied = *config;
+    applied.use_automatic_correction      = radio_cfg_automatic_correction();
+
+    res = lora_set_config(&handle, &applied);
     if (res != ESP_OK) {
         ESP_LOGE(TAG, "set_config failed: %s", esp_err_to_name(res));
         return false;
+    }
+
+    // The crystal correction the launcher measured, applied for both networks
+    // because it corrects the hardware and not the protocol. Set after the
+    // config, which is the order the launcher uses -- lora_set_config does not
+    // carry it.
+    int32_t offset = radio_cfg_frequency_offset();
+    res            = lora_set_frequency_offset(&handle, (float)offset);
+    if (res != ESP_OK) {
+        // Not fatal: an uncorrected radio still works, and on a device that was
+        // never calibrated the offset is zero anyway.
+        ESP_LOGW(TAG, "frequency offset %ld Hz not applied: %s", (long)offset, esp_err_to_name(res));
     }
 
     res = lora_set_mode(&handle, LORA_PROTOCOL_MODE_RX);
@@ -84,8 +103,9 @@ bool radio_apply_config(const lora_protocol_config_params_t* config) {
         return false;
     }
 
-    ESP_LOGI(TAG, "%.4f MHz SF%u BW%u CR4/%u sync0x%02X", config->frequency / 1000000.0,
-             config->spreading_factor, config->bandwidth, config->coding_rate, config->sync_word);
+    ESP_LOGI(TAG, "%.4f MHz SF%u BW%u CR4/%u sync0x%02X offset%+ldHz afc%d", applied.frequency / 1000000.0,
+             applied.spreading_factor, applied.bandwidth, applied.coding_rate, applied.sync_word, (long)offset,
+             applied.use_automatic_correction);
     return true;
 }
 

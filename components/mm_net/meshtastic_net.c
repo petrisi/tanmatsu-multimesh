@@ -540,8 +540,11 @@ static void meshtastic_get_config(lora_protocol_config_params_t* out) {
     out->crc_enabled                = true;
     out->invert_iq                  = false;
     out->use_dcdc                   = true;
-    out->use_automatic_correction   = true;
-    out->low_data_rate_optimization = false;
+    out->use_automatic_correction   = true;  // overridden from the device setting at apply time
+    // Required once a symbol lasts longer than 16 ms, which the preset profiles
+    // never reach but a custom SF12 at 62.5 kHz does -- 65 ms per symbol. Left
+    // off there and the link simply does not work.
+    out->low_data_rate_optimization = ((1u << active_radio.sf) / (uint32_t)active_radio.bw) >= 16;
     out->ramp_time                  = 200;
 }
 
