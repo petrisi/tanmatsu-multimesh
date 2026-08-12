@@ -24,20 +24,53 @@ preset is configured on the device. Falls back to EU/UK narrow:
 869.618 MHz  SF8  BW 62.5 kHz  CR 4/8  22 dBm  preamble 8  sync 0x12  rx_boost on
 ```
 
-**Meshtastic** uses the EdgeFastLow (EFL) profile that is compatible with NarrowSlow-preset (at some level):
+**Meshtastic** offers three choices, selected in the configuration screen:
+
+| | Frequency | SF | BW | CR | Slot |
+|---|---|---|---|---|---|
+| EdgeFastLow EU *(default)* | 869.43125 MHz | 8 | 62.5 kHz | 4:8 | 1/4 |
+| LongFast EU | 869.525 MHz | 11 | 250 kHz | 4:5 | 1/1 |
+| Custom | typed | 7–12 | from a fixed set | 4:5–4:8 | — |
+
+Sync word `0x2B` and preamble 16 apply to all three and are not configurable:
+upstream declares the sync word `const` and picks the preamble from whether the
+band is above 2 GHz, which none of these are. Transmit power is a separate
+setting, 2–22 dBm, since it is a regulatory and battery decision rather than
+part of what makes a mesh reachable.
+
+**Frequencies are stored, not computed.** Upstream derives one as
 
 ```
-channel "EdgeFastLow", PSK "AQ==" (= {0x01}, the default key)
-869.43125 MHz  SF8  BW 62.5 kHz  CR 4/8  sync 0x2B  preamble 16
-channel hash 0x55
+slot_width = spacing + 2*padding + bandwidth
+freq       = band_start + bandwidth/2 + padding + slot * slot_width
 ```
 
-The frequency is derived, not configured: EU_868 spans 869.4–869.65 MHz, which at
-62.5 kHz gives four slots, and `channel_num 1` lands at 869.4 + 62.5/2 kHz. EFL
-and LongFast cannot hear each other.
+with spacing and padding coming from a per-region profile — zero for `EU_868`,
+10.4 kHz for the narrow EU region, 37.5 kHz with 0.4 MHz spacing for `EU_866`.
+Reimplementing that means owning three sets of constants whose mistakes are
+silent, so each profile carries a tested frequency and records its slot beside it
+as documentation.
+
+LongFast EU is exactly upstream's: `EU_868` spans 869.4–869.65 MHz with no
+padding, and 250 kHz divides it into a single slot, so every LongFast node in the
+region lands on the same frequency whatever its channel is called.
+
+EdgeFastLow is a community profile rather than an upstream preset, and its slot
+is a description of the arithmetic that produced the frequency rather than one
+upstream would compute — `EU_868` carries no 62.5 kHz preset at all. Worth
+knowing when comparing: upstream's narrow channel 1 is at **869.442 MHz with
+CR 4:6**, in the separate `EU_N_868` region whose profile adds 10.4 kHz of
+padding. EdgeFastLow sits 10.4 kHz below it — exactly that padding term — and one
+coding-rate step away, which is likely why it interoperates with NarrowSlow but
+not perfectly.
+
+Profiles retune the modem and **do not touch channels**; the two are deliberately
+unconnected. The header's channel hash comes from name and PSK, so reaching the
+LongFast mesh also needs a channel named `LongFast`.
 
 `bandwidth` is a **nominal label, not a literal**: `62` selects 62.5 kHz. Passing
-`63` falls through to the driver's 125 kHz default and you hear nothing.
+`63` falls through to the driver's 125 kHz default and you hear nothing — which
+is why it is stepped through a fixed set rather than typed.
 
 ## Channels
 
@@ -304,6 +337,12 @@ written there, so this app cannot change what other apps on the device see.
 - `User.public_key` is protobuf field **8**, `bytes`, exactly 32 long. Omitting
   it is invisible locally and appears on every other radio as "no key provided",
   so `mt_wire_selftest()` checks the encoder against a fixed byte vector at boot.
+- Times are displayed in **the timezone the device is set to**. The launcher owns
+  that setting and stores the POSIX string in the shared `system` area; this app
+  reads the same value rather than keeping one of its own, so the two always
+  agree. With none stored it falls back to UTC, which is the launcher's own
+  default. The clock itself comes from the coprocessor RTC and is UTC, so the
+  timezone is purely a display transform.
 - Received timestamps are **our own receive clock on both networks**. It is the
   only clock we control, so it is the only one that gives a stable ordering and
   cannot file a message under the wrong week because a sender's clock is adrift.

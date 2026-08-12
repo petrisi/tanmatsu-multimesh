@@ -96,3 +96,10 @@ Constraints of this hardware and toolchain, each of which shapes code above it:
 - Packet RSSI from `tanmatsu-lora` is always reported as 0; the driver's own
   conversion contradicts its documented scale. SNR is shown instead, and all
   three raw status bytes go to the session log.
+- **Never read a backlight level back after setting one.** Both the display and
+  keyboard APIs take a percentage and convert to the coprocessor's 0–255 scale
+  with `(pct * 255) / 100`, converting back with `(raw * 100) / 255` — both
+  truncating, so a round trip loses about a point each time. Code that reads the
+  level before dimming, to restore it afterwards, walks a screen from 10% to 2%
+  in eight blank-and-wake cycles and looks exactly like a crash. Both levels here
+  are read once at startup and never again.

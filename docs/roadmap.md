@@ -11,13 +11,17 @@ you judge it — which is why it is described as lab and experimental use.
 
 ## Radio settings and mesh profiles
 
-Radio settings cannot be changed from the app. MeshCore follows whatever region
-preset the device is configured with; Meshtastic is fixed to EdgeFastLow. Neither
-can be retuned without a rebuild.
+Meshtastic is configurable: EdgeFastLow EU, LongFast EU, or Custom with the
+frequency, spreading factor, bandwidth and coding rate set by hand, plus transmit
+power as its own setting.
 
-Past making them editable, the aim is named profiles you can add and switch
-between — LongFast alongside EdgeFastLow and MeshCore. Still one at a time, but
-**△** becomes a picker rather than a two-way toggle.
+**MeshCore is not.** It follows whatever region preset the device is configured
+with, in the shared storage the stock MeshCore client writes, and cannot be
+retuned from here.
+
+Past that, the aim is profiles you can name, add and keep — rather than a fixed
+list of two plus one scratch slot — and for MeshCore to have the same. Still one
+network at a time, but **△** would become a picker rather than a two-way toggle.
 
 ## Message history
 

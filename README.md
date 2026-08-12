@@ -32,6 +32,9 @@ takes neither a reboot nor a reflash.
 - **Relaying on both networks** *(experimental)* — MeshCore off-grid repeat, and
   a Meshtastic CLIENT that forwards for others. Meant for temporarily holding a
   group together from a high spot, not for standing in for a permanent node.
+- **Switchable Meshtastic radio profiles** — EdgeFastLow EU, LongFast EU, or
+  custom frequency, spreading factor, bandwidth and coding rate, retuned without
+  a restart.
 - **A persistent node list** with per-node detail, short names, route management
   and Meshtastic key exchange.
 - **A Finnish keyboard layer** — å ö ä where a Finnish QWERTY puts them, on a
@@ -155,15 +158,52 @@ The **bottom side button** opens it. Shared settings apply to both networks; the
 rest belong to whichever network was active when the screen was opened, and it
 stays on that one while open.
 
+### Shared
+
 | | |
 |---|---|
 | Location | latitude and longitude, optional. Once set it goes out in **every MeshCore advert** — published to everyone in range and everyone they relay to. Decimal degrees; both coordinates or neither. |
+| Brightness | screen backlight, 10–100% in tens. Applied as you step it, and also what waking from dark restores. |
 | Screen off | minutes of no input before the backlight goes dark, 0 = never. Backlight only: the panel and the radio keep running and messages keep arriving. The key that wakes it is swallowed. |
-| Hop limit *(MT)* | 0–5. The value the active limit **resets to at every start**. |
-| Role *(MT)* | CLIENT or CLIENT_MUTE, advertised in NodeInfo. CLIENT forwards other nodes' packets; CLIENT_MUTE listens only, and is the default. |
-| Always repeat *(MT, CLIENT only)* | repeat even when another node already has, transmitting last so you only add coverage nobody else provided. |
-| Optimize text *(MT, CLIENT only)* | carry only text messages and acknowledgements, and let them keep their hop limit. Traffic that cannot be decrypted is carried normally, since its type is unreadable. |
-| Off-grid repeat *(MC)* | forward other nodes' packets to extend the mesh. Off by default, because a mesh where everyone repeats everything spends its airtime on itself. |
+| Key light | keyboard backlight, on the same scale. |
+| Keyboard off | as Screen off, but for the keys, and one minute by default. Lit keys are worth having for the moment you are typing; a screen is worth reading long after you stopped. |
+
+Both brightness settings are **spaced by eye rather than by duty cycle**. Eyes
+respond to ratios, so ten evenly spaced duty steps give one usable step and nine
+that do nothing — 20% to 10% halves the light while 100% to 90% changes it by a
+ninth. The levels follow a geometric ramp instead, about 1.4× per step, and the
+duty actually applied is shown under the row.
+
+On first run both adopt whatever the device is already set to, so an update never
+brightens a screen somebody deliberately dimmed.
+
+### Meshtastic
+
+| | |
+|---|---|
+| Radio | **EdgeFastLow EU**, **LongFast EU** or **Custom**. The note under the row spells out what goes to the modem — `869.525 MHz SF11 BW250 CR4:5 slot 1/1` — and that same string goes to the logs, so what is on screen is what went to the air. |
+| Frequency, Spreading, Bandwidth, Coding rate | Custom only. Frequency is typed in MHz; bandwidth steps a fixed set, because the driver takes a nominal label and an unrecognised one falls back to 125 kHz and hears nothing. |
+| Power | 2–22 dBm. Separate from the profile: it is a regulatory and battery decision, and applies whichever profile is chosen. The band permits 27 but the module stops at 22. |
+| Hop limit | 0–5. The value the active limit **resets to at every start**. |
+| Role | CLIENT or CLIENT_MUTE, advertised in NodeInfo. CLIENT forwards other nodes' packets; CLIENT_MUTE listens only, and is the default. |
+| Always repeat *(CLIENT only)* | repeat even when another node already has, transmitting last so you only add coverage nobody else provided. |
+| Optimize text *(CLIENT only)* | carry only text messages and acknowledgements, and let them keep their hop limit. Traffic that cannot be decrypted is carried normally, since its type is unreadable. |
+
+Changing the profile retunes immediately — no network switch needed. **Channels
+are not touched.** The two are deliberately unconnected, so reaching the LongFast
+mesh also means adding a channel named `LongFast` with the default PSK; switching
+the radio alone gives you carrier and nothing readable.
+
+### MeshCore
+
+| | |
+|---|---|
+| Off-grid repeat | forward other nodes' packets to extend the mesh. Off by default, because a mesh where everyone repeats everything spends its airtime on itself. |
+
+MeshCore's modem settings are not editable here. They come from the shared
+`system` storage the stock MeshCore client writes, so this app follows whatever
+region preset is configured on the device — and never writes there, so it cannot
+change what other apps rely on.
 
 The two Meshtastic relay settings are shown only at role CLIENT, since at
 CLIENT_MUTE they would be controls for something that cannot happen. They are
