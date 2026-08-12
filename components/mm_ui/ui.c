@@ -846,6 +846,29 @@ static void draw_composer(const app_model_t* model) {
     snprintf(count, sizeof(count), "%4d", model->composer_len);
     pax_draw_text(&fb, model->composer_len ? col : COL_SEP, FONT, FONT_SIZE, ui_w - 8 - 4 * CHAR_W,
                   composer_y + 3, count);
+
+    // What an empty line can do that is not written anywhere else on screen.
+    //
+    // Here rather than in the hint bar because that bar is full: six keycaps
+    // leave about eighty pixels, and this needs five hundred. The composer row
+    // is empty at exactly the moment these apply, which is also the only moment
+    // they are worth reading -- they disappear as soon as there is anything to
+    // send.
+    //
+    // Spelled out rather than drawn with symbols: the font is ASCII plus six
+    // Finnish letters, so there is no arrow and no return glyph to use.
+    //
+    // In the separator colour, dimmer than the hint bar's, because this is a
+    // reminder for the person who has forgotten rather than a label for the
+    // person who is looking.
+    if (model->composer_len == 0) {
+        const char* extras = "ctrl+up/dn recall    hold enter for CQ";
+        float       right  = ui_w - 8 - 5 * CHAR_W;  // clear of the byte counter
+        float       start  = right - (float)strlen(extras) * CHAR_W;
+        if (start > x + 2 * CHAR_W) {  // never crowd the cursor
+            pax_draw_text(&fb, COL_SEP, FONT, FONT_SIZE, start, composer_y + 3, extras);
+        }
+    }
 }
 
 static void draw_hints(const app_model_t* model) {
